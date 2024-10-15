@@ -10,8 +10,8 @@ Arxiv: [https://arxiv.org/abs/2409.16876](https://arxiv.org/abs/2409.16876)
 Clone the repository and install the dependencies:
 
 ```bash
-git clone 
-cd TR-Agents
+git clone https://github.com/Guoxs/TR-Agent.git
+cd TR-Agent
 ```
 
 Install the dependencies:
