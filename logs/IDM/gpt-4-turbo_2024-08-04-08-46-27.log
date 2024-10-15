@@ -1,0 +1,134 @@
+2024-08-04 08:46:58,887 - research_agent_logger - INFO - Configurations: 
+ {'task_name': 'IDM', 'llm_model': 'gpt-4-turbo', 'llm_temperature': 0.5, 'max_iter': 10, 'improve_rate': 0.2, 'seed': 2024, 'dataset_path': 'D:\\Documents\\Projects\\Traffic_Agent\\datasets', 'offline_paper_path': 'D:\\Documents\\Projects\\Traffic_Agent\\papers', 'code_gen_try_times': 5, 'IDM': {'data_sample_len': 15, 'dataset_name': 'SH_Fol', 'calib_data_len': 256, 'time_interval': 0.1, 'eval_metric': 'spacing_with_state'}, 'MOBIL': {'dataset_name': 'ngsim_data.npy'}, 'LWR': {'dataset_name': 'PeMS'}}
+2024-08-04 08:46:58,890 - research_agent_logger - INFO - Baseline model defination: 
+     def baseline_model(self, params, spacing, svSpd, relSpd):
+        '''Calculate acceleration of the following vehicle using IDM model
+            spacing: scaler, headway distance between the leading and following vehicle
+            svSpd: scaler, speed of the following vehicle
+            relSpd: scaler, speed difference between the leading and following vehicles  
+            params: [desired_speed, desired_time_window, max_acc, comfort_acc, beta, jam_space]
+            
+            return acc: scaler, acceleration of the following vehicle
+        '''
+        desiredSpd, desiredTimeHdw, maxAcc, comfortAcc, beta, jamSpace = params
+        desiredSpacing = jamSpace + np.maximum(0, svSpd * desiredTimeHdw - (svSpd * relSpd) / (2 * np.sqrt(maxAcc * comfortAcc)))
+        acc = maxAcc * (1 - svSpd / (desiredSpd + 1e-6) ** beta - desiredSpacing / (spacing + 1e-6) ** 2)
+        # handle the negative spacing
+        if spacing < 0:
+            acc = -maxAcc
+        return acc
+
+2024-08-04 08:50:58,377 - research_agent_logger - INFO - Base model total loss: 4.385
+2024-08-04 08:50:58,378 - research_agent_logger - INFO - Base model loss for each driving scenarios: [free driving: 4.0021, following: 5.1611, closing in: 5.5264,  emergency braking: 2.8521].
+2024-08-04 08:50:58,378 - research_agent_logger - INFO - ============ Iteration 0 ============
+2024-08-04 08:51:59,303 - research_agent_logger - INFO - Idea: 
+ **Explanation of the IDM Model:**
+The Intelligent Driver Model (IDM) is a deterministic, time-continuous car-following model that adjusts vehicle dynamics based on the current and desired velocities, and the bumper-to-bumper distance to the vehicle ahead. It aims to ensure collision-free driving and can be empirically parameterized.
+
+**Analysis of Deficiencies:**
+IDM's limitations include predicting negative or diverging velocities under certain conditions, overly aggressive braking or acceleration (over-reactions), a focus on only the vehicle directly in front, and insufficient realism in complex driving scenarios like multi-lane traffic or intersections.
+
+**Proposal for Improvements:**
+1. **Prevent Negative or Diverging Velocities**: Introduce a minimum velocity constraint and modify the acceleration equation to ensure that the velocity does not drop below a realistic positive threshold, even under strong deceleration scenarios.
+2. **Reduce Over-Reactions**: Implement a damping term in the acceleration function that smoothens the response to rapid decelerations by the vehicle ahead. This can be modeled by a function that gradually adjusts acceleration based on the rate of change of the leading vehicle's speed.
+3. **Incorporate Broader Traffic Dynamics**: Extend the model to consider multiple preceding vehicles (Multi-anticipative IDM). This can be achieved by incorporating weights for each vehicle ahead, which decay with distance, thus reflecting a more realistic perception range of a driver.
+4. **Enhance Realism in Complex Scenarios**: Introduce stochastic elements that account for human error and variability in driver behavior. This can include random fluctuations in acceleration and deceleration, influenced by factors such as driver distraction or varying environmental conditions.
+
+These improvements are designed to address the mathematical deficiencies of the original IDM, enhancing its applicability and realism in simulating traffic dynamics.
+2024-08-04 08:52:11,631 - research_agent_logger - INFO - Code: 
+ def Improved_IDM(params, spacing, svSpd, relSpd):
+    """Calculate acceleration of the following vehicle using improved IDM model
+          spacing: scalar, headway distance between the leading and following vehicle
+          svSpd: scalar, speed of the following vehicle
+          relSpd: scalar, speed difference between the leading and following vehicles  
+          params: parameters list, [desired_speed, desired_time_window, max_acc, comfort_acc, beta, jam_space]
+            
+          return acc: scalar, acceleration of the following vehicle
+    """
+    import numpy as np
+    
+    # Unpack parameters
+    desiredSpd, desiredTimeHdw, maxAcc, comfortAcc, beta, jamSpace = params
+    
+    # Calculate the desired minimum spacing
+    s_star = jamSpace + svSpd * desiredTimeHdw + (svSpd * relSpd) / (2 * np.sqrt(maxAcc * comfortAcc))
+    
+    # Calculate acceleration using the IDM formula
+    acc_free = maxAcc * (1 - (svSpd / desiredSpd)**beta)
+    
+    # Calculate interaction term with the leading vehicle
+    acc_interact = -maxAcc * ((s_star / max(spacing, jamSpace))**2)
+    
+    # Calculate the total acceleration
+    acceleration = acc_free + acc_interact
+    
+    # Introduce damping to reduce over-reactions (simple implementation)
+    damping_factor = 0.5
+    acceleration += damping_factor * relSpd
+    
+    # Prevent negative or diverging velocities by ensuring a minimum threshold
+    min_velocity_threshold = 0.1  # 0.1 m/s as a realistic non-zero lower bound
+    if svSpd + acceleration * 0.1 < min_velocity_threshold:
+        acceleration = (min_velocity_threshold - svSpd) / 0.1
+    
+    # Ensure that the acceleration does not exceed maximum deceleration limit
+    max_deceleration = -comfortAcc
+    if acceleration < max_deceleration:
+        acceleration = max_deceleration
+    
+    return acceleration
+2024-08-04 08:55:34,839 - research_agent_logger - INFO - Model total loss: 3.360
+2024-08-04 08:55:34,840 - research_agent_logger - INFO - Model Loss for each driving scenarios: [free driving: 2.9859,  following: 3.7588, closing in: 4.2904,  emergency braking: 2.4059].
+2024-08-04 08:55:34,840 - research_agent_logger - INFO - Baseline model loss: 4.385, improved model loss: 3.360, improved rate: 23.38%. Throughout the driving event, the model performs worst in the closing in phase.
+2024-08-04 08:55:34,840 - research_agent_logger - INFO - Improved model found!
+2024-08-04 08:55:42,387 - research_agent_logger - INFO - Success factors: 
+ The improvement in the model's performance can be attributed to several key modifications made to the original Intelligent Driver Model (IDM). Firstly, the introduction of a damping factor to the acceleration calculation effectively reduced over-reactions to rapid decelerations by the vehicle ahead, leading to smoother driving dynamics and less aggressive braking. This change is particularly beneficial in scenarios like emergency braking, where the improved model showed a notable decrease in loss from 2.8521 to 2.4059.
+
+Additionally, the implementation of a minimum velocity threshold ensured that the vehicle's speed does not fall below a realistic positive value, addressing the issue of negative or diverging velocities in strong deceleration scenarios. This adjustment likely contributed to the overall stability and realism of the model.
+
+The revised model also features an enhanced interaction term that calculates acceleration based on both the free road and the interaction with the leading vehicle, providing a more nuanced response to varying traffic conditions. This likely helped in reducing the total model loss across different driving scenarios, as evidenced by the improved loss figures for free driving and following scenarios. 
+
+Overall, these modifications provided a more robust and realistic simulation of vehicle dynamics, leading to a 23.38% improvement in model performance.
+2024-08-04 08:55:42,388 - research_agent_logger - INFO - best_algorithm: 
+ def Improved_IDM(params, spacing, svSpd, relSpd):
+    """Calculate acceleration of the following vehicle using improved IDM model
+          spacing: scalar, headway distance between the leading and following vehicle
+          svSpd: scalar, speed of the following vehicle
+          relSpd: scalar, speed difference between the leading and following vehicles  
+          params: parameters list, [desired_speed, desired_time_window, max_acc, comfort_acc, beta, jam_space]
+            
+          return acc: scalar, acceleration of the following vehicle
+    """
+    import numpy as np
+    
+    # Unpack parameters
+    desiredSpd, desiredTimeHdw, maxAcc, comfortAcc, beta, jamSpace = params
+    
+    # Calculate the desired minimum spacing
+    s_star = jamSpace + svSpd * desiredTimeHdw + (svSpd * relSpd) / (2 * np.sqrt(maxAcc * comfortAcc))
+    
+    # Calculate acceleration using the IDM formula
+    acc_free = maxAcc * (1 - (svSpd / desiredSpd)**beta)
+    
+    # Calculate interaction term with the leading vehicle
+    acc_interact = -maxAcc * ((s_star / max(spacing, jamSpace))**2)
+    
+    # Calculate the total acceleration
+    acceleration = acc_free + acc_interact
+    
+    # Introduce damping to reduce over-reactions (simple implementation)
+    damping_factor = 0.5
+    acceleration += damping_factor * relSpd
+    
+    # Prevent negative or diverging velocities by ensuring a minimum threshold
+    min_velocity_threshold = 0.1  # 0.1 m/s as a realistic non-zero lower bound
+    if svSpd + acceleration * 0.1 < min_velocity_threshold:
+        acceleration = (min_velocity_threshold - svSpd) / 0.1
+    
+    # Ensure that the acceleration does not exceed maximum deceleration limit
+    max_deceleration = -comfortAcc
+    if acceleration < max_deceleration:
+        acceleration = max_deceleration
+    
+    return acceleration
+2024-08-04 08:55:42,398 - research_agent_logger - INFO - improve rate list (%): [23.38]

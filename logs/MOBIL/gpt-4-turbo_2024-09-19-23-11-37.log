@@ -1,0 +1,1250 @@
+2024-09-19 23:11:59,391 - research_agent_logger - INFO - Configurations: 
+ {'task_name': 'MOBIL', 'llm_model': 'gpt-4-turbo', 'llm_temperature': 0.5, 'max_iter': 10, 'improve_rate': 0.2, 'seed': 2024, 'dataset_path': 'D:\\Documents\\Projects\\Traffic_Agent\\datasets', 'offline_paper_path': 'D:\\Documents\\Projects\\Traffic_Agent\\papers', 'code_gen_try_times': 5, 'IDM': {'data_sample_len': 15, 'dataset_name': 'SH_Fol', 'calib_data_len': 256, 'time_interval': 0.1, 'eval_metric': 'spacing_with_state'}, 'MOBIL': {'dataset_name': 'ngsim_data.npy'}, 'LWR': {'dataset_name': 'PeMS'}}
+2024-09-19 23:11:59,396 - research_agent_logger - INFO - Baseline model defination: 
+     def baseline_model(self, event_data, params):
+        ''' MOBIL baseline model for lane change decision
+            event_data:  [N, 12] ndarray, event datas for test vehicles, each row contains the following data
+                [
+                    v: speed of the following vehicle
+                    s: headway distance between the leading and following vehicle
+                    of_v: speed of the original lane front vehicle
+                    or_v: speed of the original lane rear vehicle
+                    tf_v: speed of the target lane front vehicle
+                    tr_v: speed of the target lane rear vehicle
+                    rtf_x: relative distance to the target lane front vehicle
+                    rtr_x: relative distance to the target lane rear vehicle
+                    rr_x: relative distance to the rear vehicle
+                    or_acc: acceleration of the original lane rear vehicle
+                    tr_acc: acceleration of the target lane rear vehicle
+                ]
+            params: Scaler list, parameters for IDM model and MOBIL model 
+                [
+                    jam_space, desired_time_window, max_acc, comfort_acc, beta, # IDM parameters
+                    politeness, b_safe, acc_thres # MOBIL parameters
+                ]
+        '''
+        def calculate_idm_acceleration(leading_v, v, s, params):
+            '''Calculate acceleration of the following vehicle using IDM model
+                leading_v: (N,), ndarray, speed of the leading vehicles
+                v: (N,), ndarray, speed of the following vehicles
+                s: (N,), ndarray, headway distances between the leading and following vehicles
+                params: [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+            '''
+            desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+                        
+            delta_v = leading_v - v
+            s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+            acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+
+            # handle the negative spacing
+            acceleration[s <= 0] = -max_acc
+
+            return acceleration
+        
+        # Extract event data and parameters
+        v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T # [12, N]
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+        idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+        
+        # Calculate acceleration of the following vehicle
+        acc = calculate_idm_acceleration(of_v, v, s, idm_params)
+
+        # Calculate acceleration of the following vehicle in the new lane
+        acc_new = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+
+        # Calculate acceleration of the target lane rear vehicle
+        tr_acc_new = calculate_idm_acceleration(v, tr_v, rtr_x, idm_params)
+
+        # Calculate acceleration of the original lane rear vehicle
+        or_acc_new = calculate_idm_acceleration(v, or_v, rr_x, idm_params)
+
+        # Calculate acceleration differences
+        acc_diff = acc_new - acc
+        tr_acc_diff = tr_acc_new - tr_acc
+        or_acc_diff = or_acc_new - or_acc
+
+        # Check if the lane change is beneficial
+        benefit = acc_diff + politeness * (tr_acc_diff + or_acc_diff)
+        benefit_idx = benefit > acc_thres
+        
+        # Check if the target lane rear vehicle is safe
+        safe_idx = tr_acc_new <= b_safe
+
+        # Make lane change decision
+        lane_change_decision = np.zeros_like(v)
+        lane_change_decision[benefit_idx & safe_idx] = 1
+
+        return lane_change_decision
+
+2024-09-19 23:12:23,745 - research_agent_logger - INFO - Base model loss: 0.706
+2024-09-19 23:12:23,745 - research_agent_logger - INFO - Base model evaluation results: [Precision: 0.530, Recall: 0.203, F1: 0.294, Specificity: 0.820], 
+2024-09-19 23:12:23,745 - research_agent_logger - INFO - Base model confusion matrix: [TP: 3006, TN: 12137, FP: 2663, FN: 11794]
+2024-09-19 23:12:23,745 - research_agent_logger - INFO - ============ Iteration 0 ============
+2024-09-19 23:13:49,796 - research_agent_logger - INFO - Idea: 
+ **Explanation of the MOBIL Model:**
+The MOBIL model determines the appropriateness of lane changes in traffic simulations by evaluating the acceleration benefits to the changing vehicle and the effects on surrounding traffic. The decision criterion is mathematically expressed as:
+\[ \Delta a_{SV} + p \cdot (\Delta a_{FV} + \Delta a_{PFV}) > \text{threshold} \]
+where \(\Delta a_{SV}\), \(\Delta a_{FV}\), and \(\Delta a_{PFV}\) represent the change in acceleration for the subject vehicle, following vehicle in the original lane, and following vehicle in the new lane, respectively. The parameter \(p\) is the politeness factor.
+
+**Analysis of Deficiencies:**
+1. **Communication Delay**: The model does not account for delays in communication between vehicles, which can affect decision-making in real-time scenarios.
+2. **Errors in Measurement and Information Transmission**: It assumes perfect information, not considering potential errors in data acquisition or transmission.
+3. **Complex Lane Change Conflict and Cooperation**: The model lacks mechanisms to handle complex interactions involving multiple vehicles with different objectives.
+
+**Proposal for Improvements:**
+1. **Stochastic Modeling**: Integrate stochastic elements to handle uncertainties due to communication delays and data errors, providing a probabilistic rather than deterministic outlook on lane changes.
+2. **Queue Theory**: Implement queue theory to model and manage communication delays in vehicle-to-vehicle interactions.
+3. **Information Theory**: Apply principles of information theory to optimize information transmission and quantify the impact of transmission errors.
+4. **Robust Control Theory**: Develop control strategies that are robust against the variabilities in vehicle behavior due to measurement inaccuracies or delayed data.
+5. **Game Theory**: Enhance the model's ability to manage complex interactions by incorporating game-theoretical concepts, facilitating better decision-making in scenarios with conflicting vehicle objectives.
+6. **Filtering Techniques**: Use filtering methods, such as Kalman Filters, to improve the accuracy of state estimates under noisy conditions.
+
+These mathematical improvements aim to enhance the reliability, safety, and efficiency of the MOBIL model in simulating and managing lane-changing behavior on multi-lane roads.
+2024-09-19 23:14:53,928 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """
+    Improved MOBIL model for lane change decision-making in intelligent transportation systems.
+
+    Args:
+    event_data: numpy.ndarray
+        Shape [N, 11], where N is the number of test vehicles. Each row contains:
+        [v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc], representing:
+            v: speed of the following vehicle
+            s: headway distance between the leading and following vehicle
+            of_v: speed of the original lane front vehicle
+            or_v: speed of the original lane rear vehicle
+            tf_v: speed of the target lane front vehicle
+            tr_v: speed of the target lane rear vehicle
+            rtf_x: relative distance to the target lane front vehicle
+            rtr_x: relative distance to the target lane rear vehicle
+            rr_x: relative distance to the rear vehicle in the original lane
+            or_acc: acceleration of the original lane rear vehicle
+            tr_acc: acceleration of the target lane rear vehicle
+
+    params: list
+        Parameters for IDM model and improved MOBIL model:
+        [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres], where:
+            desired_speed: desired velocity of vehicles (m/s)
+            jam_space: minimum space in traffic jam (m)
+            desired_time_window: desired time headway to leading vehicle (s)
+            max_acc: maximum acceleration (m/s^2)
+            comfort_acc: comfortable acceleration (m/s^2)
+            beta: acceleration exponent
+            politeness: politeness factor in making lane changes
+            b_safe: safe distance for lane changing (m)
+            acc_thres: acceleration threshold for making a lane change decision
+
+    Returns:
+    numpy.ndarray
+        An array of binary decisions (0 or 1) for each vehicle whether to change lane or not.
+    """
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration using the Intelligent Driver Model (IDM)."""
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+        acceleration[s <= 0] = -max_acc  # Handle negative or zero spacing
+        return acceleration
+
+    # Unpack event data and parameters
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+
+    # Calculate current and new accelerations in both original and target lanes
+    a_o = calculate_idm_acceleration(of_v, v, s, idm_params)
+    a_n = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+    a_o_new = calculate_idm_acceleration(v, or_v, rr_x, idm_params)
+    a_n_new = calculate_idm_acceleration(v, tr_v, rtr_x, idm_params)
+
+    # Calculate changes in acceleration
+    delta_a_sv = a_n - a_o
+    delta_a_fv = a_o_new - or_acc
+    delta_a_pfv = a_n_new - tr_acc
+
+    # Decision criteria
+    incentive_criterion = delta_a_sv + politeness * (delta_a_fv + delta_a_pfv)
+    safety_criterion = (rtf_x > b_safe) & (rtr_x > b_safe)
+
+    # Final decision
+    change_decision = (incentive_criterion > acc_thres) & safety_criterion
+
+    return change_decision.astype(int)
+2024-09-19 23:15:13,368 - research_agent_logger - INFO - Model loss: 0.695
+2024-09-19 23:15:13,369 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.738, Recall: 0.192, F1: 0.305, Specificity: 0.932], Model confusion matrix: [TP: 2840, TN: 13790, FP: 1010, FN: 11960]
+2024-09-19 23:15:13,369 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.695, improved rate:  1.54%.
+2024-09-19 23:15:38,668 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the trial logs reveals that the improved MOBIL model, despite its enhancements, did not meet the performance requirements significantly, particularly in terms of recall and F1-score. Here's a breakdown of possible reasons for this shortfall and specific suggestions for further improvement:
+
+### Analysis of Shortfalls:
+1. **Recall Issue**: The low recall (0.192) indicates that the model is missing a significant number of true lane change opportunities. This could be due to overly conservative safety criteria or a high acceleration threshold that prevents the model from recommending lane changes unless very clear benefits are evident.
+
+2. **Precision and Specificity**: While there is an improvement in precision (from 0.530 to 0.738) and specificity (from 0.820 to 0.932), this suggests that the model has become more conservative, possibly at the cost of missing viable lane change opportunities (low recall).
+
+3. **Safety Criteria**: The safety criterion, which checks if the relative distances in the target lane (`rtf_x` and `rtr_x`) are greater than `b_safe`, might be too restrictive or the value of `b_safe` might be set too high, limiting the number of approved lane changes.
+
+### Suggestions for Further Improvement:
+1. **Adjust Safety Margins**: Reevaluate and possibly lower the `b_safe` parameter. A sensitivity analysis around this parameter could provide insights into its impact on recall without significantly compromising safety.
+
+2. **Reassess Acceleration Threshold (`acc_thres`)**: The current threshold for acceleration gain might be too high, causing the model to miss opportunities where a lane change could still be beneficial. Testing lower thresholds could help find a balance between safety and maneuverability.
+
+3. **Enhanced Decision Criteria**: Incorporate additional criteria into the decision-making process, such as the relative speeds of vehicles and their acceleration trends. This can provide a more dynamic assessment that adapts to varying traffic conditions.
+
+4. **Non-linear Politeness Factor**: Consider making the politeness factor a function of traffic density or relative speeds, allowing for more flexible and context-aware decisions.
+
+5. **Multi-Vehicle Interaction**: Extend the model to consider the impacts on more than just the immediately adjacent vehicles. This could involve analyzing the effects of a proposed lane change on a wider range of surrounding vehicles to better capture complex traffic dynamics.
+
+By addressing these areas, the MOBIL model can potentially offer more balanced performance, improving both the safety and efficiency of lane change decisions in varied traffic scenarios.
+2024-09-19 23:15:38,669 - research_agent_logger - INFO - New questions: 
+ 1. How can we modify the existing mathematical formulations to better capture the underlying patterns and relationships in the model, without relying on machine learning techniques?
+
+2. Are there any recent theoretical advancements or modifications in similar mathematical models that have shown significant improvements in performance in other fields or applications?
+
+3. What are the limitations of the current mathematical approaches used in our model, and how might alternative mathematical theories or principles help overcome these limitations?
+
+4. Can integration of non-linear dynamics or stochastic elements into our existing model's mathematical formulations offer a more robust performance under varying conditions?
+
+5. How can we leverage mathematical optimization techniques to enhance the efficiency and accuracy of the model, and are there specific case studies or papers that detail similar successful applications?
+2024-09-19 23:15:38,670 - research_agent_logger - INFO - ============ Iteration 1 ============
+2024-09-19 23:16:29,974 - research_agent_logger - INFO - Idea: 
+ To further improve the MOBIL model's performance, the following strategies are proposed:
+1. **Integration of Optimization Techniques**: Adopt mathematical optimization methods to dynamically adjust model parameters such as safety margins (`b_safe`) and acceleration thresholds (`acc_thres`) based on real-time traffic data and conditions. This could help balance safety and maneuverability more effectively.
+2. **Incorporation of Non-linear Dynamics and Stochastic Elements**: Enhance the model's robustness and adaptability by integrating approaches that account for the non-linear dynamics of traffic flow and the stochastic nature of traffic conditions. This could improve the model's ability to handle unpredictable scenarios and reduce errors in decision-making.
+3. **Use of Data-driven Approaches**: Similar to the UTMOM, implement data-driven methodologies that utilize real-time traffic data to continuously update and optimize the model's performance. This could help in reducing discrepancies and improving the accuracy of traffic flow predictions.
+4. **Adaptation of Lightweight Fine-tuning Techniques**: Borrow concepts from fields like machine learning to allow for minimal yet effective model adjustments in response to varying traffic patterns and conditions. This could enhance the model's flexibility and responsiveness without requiring extensive modifications.
+
+By implementing these strategies, the MOBIL model can potentially achieve a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios.
+2024-09-19 23:18:08,023 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """Improved MOBIL model for lane change decision using Intelligent Driver Model (IDM) and MOBIL principles.
+    
+    Args:
+        event_data (ndarray): An array of shape [N, 11] where N is the number of vehicles.
+            Each row contains the following data for each vehicle:
+            - v: speed of the following vehicle
+            - s: headway distance between the leading and following vehicle
+            - of_v: speed of the original lane front vehicle
+            - or_v: speed of the original lane rear vehicle
+            - tf_v: speed of the target lane front vehicle
+            - tr_v: speed of the target lane rear vehicle
+            - rtf_x: relative distance to the target lane front vehicle
+            - rtr_x: relative distance to the target lane rear vehicle
+            - rr_x: relative distance to the rear vehicle in the original lane
+            - or_acc: acceleration of the original lane rear vehicle
+            - tr_acc: acceleration of the target lane rear vehicle
+        params (list): Parameters for IDM model and improved MOBIL model.
+            Includes:
+            - desired_speed: Desired velocity of vehicles (scalar).
+            - jam_space: Minimum desired spacing between vehicles (scalar).
+            - desired_time_window: Desired time headway to the leading vehicle (scalar).
+            - max_acc: Maximum vehicle acceleration (scalar).
+            - comfort_acc: Comfortable acceleration (scalar).
+            - beta: Exponent used in the IDM equation (scalar).
+            - politeness: Politeness factor in MOBIL model (scalar).
+            - b_safe: Minimum safety distance in the target lane (scalar).
+            - acc_thres: Acceleration threshold for making a lane change (scalar).
+    
+    Returns:
+        ndarray: A binary array indicating lane change decisions for each vehicle.
+    """
+    import numpy as np
+    
+    # Extracting parameters
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, \
+    politeness, b_safe, acc_thres = params
+    
+    # Extracting event data
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    
+    # Helper function to calculate accelerations using IDM model
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration of the following vehicle using IDM model."""
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+        
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - (v / (desired_speed + 1e-6))**beta - (s_star / (s + 1e-6))**2)
+        
+        # Handle negative spacing by setting acceleration to a high negative value
+        acceleration[s <= 0] = -max_acc
+        
+        return acceleration
+    
+    # IDM parameters
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+    
+    # Calculate accelerations using IDM for original and target lanes
+    acc_orig = calculate_idm_acceleration(of_v, v, s, idm_params)
+    acc_target = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+    
+    # Calculate accelerations for rear vehicles in the original and target lanes
+    acc_or_new = calculate_idm_acceleration(v, or_v, rr_x, idm_params)
+    acc_tr_new = calculate_idm_acceleration(v, tr_v, rtr_x, idm_params)
+    
+    # Incentive criterion
+    ��a_self = acc_target - acc_orig
+    ��a_others = (acc_tr_new - tr_acc) + politeness * (acc_or_new - or_acc)
+    incentive_criterion = ��a_self + ��a_others > acc_thres
+    
+    # Safety criterion
+    safety_criterion = (rtf_x > b_safe) & (rtr_x > b_safe)
+    
+    # Final decision: both incentive and safety criteria must be met
+    change_decision = incentive_criterion & safety_criterion
+    
+    return change_decision.astype(int)
+2024-09-19 23:18:25,406 - research_agent_logger - INFO - Model loss: 0.705
+2024-09-19 23:18:25,406 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.777, Recall: 0.182, F1: 0.295, Specificity: 0.948], Model confusion matrix: [TP: 2700, TN: 14025, FP: 775, FN: 12100]
+2024-09-19 23:18:25,407 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.705, improved rate:  0.25%.
+2024-09-19 23:18:53,589 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the log file indicates that the last iteration of the MOBIL model, despite improvements, still did not meet the desired performance requirements. The primary issues identified include low recall and only marginal improvements in F1-score and loss. Here's a breakdown of potential reasons and suggestions for further mathematical enhancements:
+
+### Reasons for Low Performance:
+1. **Low Recall**: The model's low recall (0.182) suggests it is failing to identify a significant number of valid lane change opportunities. This could be due to overly conservative decision-making criteria, particularly in the safety thresholds and acceleration benefits, which might be too stringent or not adequately reflective of real-world driving conditions.
+   
+2. **Conservative Safety Criteria**: The safety parameters (`b_safe` and `acc_thres`) appear to be set such that the model prioritizes avoiding false positives (unnecessary lane changes), which is also indicated by the high specificity (0.948). While this ensures safer recommendations, it also prevents the model from recommending beneficial lane changes, thereby reducing recall.
+
+3. **Static Politeness Factor**: The politeness factor, while aiming to balance the benefits across multiple vehicles, might not dynamically reflect the varying traffic densities and individual driver behaviors, leading to suboptimal decision-making.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Adjustment of Safety and Decision Criteria**: Introduce adaptive thresholds for safety (`b_safe`) and decision-making (`acc_thres`) that respond to real-time traffic conditions. For instance, these thresholds could be adjusted based on the traffic density or average speed, allowing for more flexible decision-making.
+
+2. **Incorporation of Traffic Density in Decision Criteria**: Modify the politeness factor to be a function of traffic density or relative speeds. This would allow the model to make more aggressive lane changes in lighter traffic, potentially improving recall without compromising safety.
+
+3. **Advanced Modeling of Vehicle Interactions**: Extend the model to consider not just the immediate neighboring vehicles but also other nearby vehicles that might be indirectly affected by a lane change. This could involve a more comprehensive analysis of the traffic flow and vehicle interactions within a larger radius.
+
+4. **Refinement of IDM Calculations**: Review and refine the IDM component of the model to better capture the nuances of vehicle acceleration and deceleration in dense traffic scenarios. This might involve adjusting the IDM parameters like `desired_time_window` and `jam_space` based on empirical data of traffic flow under various conditions.
+
+By focusing on these areas, the MOBIL model can potentially achieve a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios. These suggestions adhere to the guidelines of avoiding machine learning techniques and not focusing solely on parameter optimization, providing a concrete path for mathematical enhancements based on the analysis of the log file.
+2024-09-19 23:18:53,591 - research_agent_logger - INFO - New questions: 
+ 1. How do the core mathematical formulations in our model compare with the latest theoretical advancements in numerical methods and optimization theories? Are there specific mathematical techniques or theories that have been recently developed which could be integrated into our model to enhance its performance?
+
+2. What are the inherent limitations in the current mathematical formulations used in our model? Are there alternative mathematical approaches or modifications that could potentially address these limitations without resorting to machine learning methodologies?
+
+3. Can we identify any successful case studies or academic papers where similar performance issues were resolved through innovative mathematical formulations? What specific mathematical strategies were employed in these cases, and how can they be adapted to our context?
+
+4. Have there been recent advancements in computational algorithms that could improve the efficiency or accuracy of our model��s existing mathematical formulations? How can these advancements be incorporated into our model?
+
+5. Are there collaborative opportunities with mathematicians or theorists who specialize in the areas where our model is underperforming? What could be gained from such collaborations in terms of fresh perspectives or unexplored mathematical techniques?
+2024-09-19 23:18:53,592 - research_agent_logger - INFO - ============ Iteration 2 ============
+2024-09-19 23:19:59,378 - research_agent_logger - INFO - Idea: 
+ To further improve the MOBIL model's performance, consider the following refined strategies:
+1. **Hybrid Traffic Modeling**: Inspired by successful case studies, integrate both macroscopic and microscopic traffic modeling techniques. This approach can enhance the model's accuracy in simulating diverse traffic scenarios, thereby improving decision-making for lane changes.
+2. **Dynamic and Adaptive Thresholds**: Develop algorithms that dynamically adjust safety and decision-making thresholds (e.g., `b_safe`, `acc_thres`) based on real-time data such as traffic density and average speeds. This can make the model more responsive to varying traffic conditions and potentially improve recall rates.
+3. **Enhanced Interaction Modeling**: Extend the model to consider a broader range of vehicle interactions, possibly incorporating more sophisticated gap acceptance and car following models that better reflect real-world driver behavior and heterogeneity.
+4. **Computational Optimization**: Apply recent advancements in computational algorithms that optimize traffic flow without relying on deep learning. For instance, consider algorithms that efficiently manage data processing and calculations, reducing computational overhead while maintaining or improving model accuracy.
+5. **Collaborative Research**: Engage with mathematicians and traffic modeling experts to explore new theoretical advancements and computational techniques that could be adapted for the MOBIL model. This could provide fresh insights and innovative approaches to overcoming the model's current limitations.
+
+By implementing these strategies, the MOBIL model can achieve a more robust and accurate performance, better handling the complexities of real-world traffic scenarios and enhancing safety and efficiency in automated vehicle lane changes.
+2024-09-19 23:21:01,915 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """
+    Improved MOBIL model for lane change decision using the Intelligent Driver Model (IDM) 
+    and MOBIL for lane changing rules.
+
+    Parameters:
+    - event_data: numpy.ndarray
+        Shape [N, 11], where N is the number of vehicles. Each row contains:
+        [v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc], representing:
+            v: speed of the following vehicle
+            s: headway distance between the leading and following vehicle
+            of_v: speed of the original lane front vehicle
+            or_v: speed of the original lane rear vehicle
+            tf_v: speed of the target lane front vehicle
+            tr_v: speed of the target lane rear vehicle
+            rtf_x: relative distance to the target lane front vehicle
+            rtr_x: relative distance to the target lane rear vehicle
+            rr_x: relative distance to the rear vehicle in the original lane
+            or_acc: acceleration of the original lane rear vehicle
+            tr_acc: acceleration of the target lane rear vehicle
+
+    - params: list
+        Parameters for the IDM and MOBIL models:
+        [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, 
+         politeness, b_safe, acc_thres]
+
+    Returns:
+    - change_decision: numpy.ndarray
+        An array containing lane change decisions (1 for change, 0 for stay) for each vehicle.
+    """
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """
+        Calculate acceleration using the Intelligent Driver Model (IDM).
+        
+        Parameters:
+        - leading_v: numpy.ndarray
+            Speeds of the leading vehicles.
+        - v: numpy.ndarray
+            Speeds of the following vehicles.
+        - s: numpy.ndarray
+            Headway distances between the following and leading vehicles.
+        - params: list
+            IDM parameters: [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+
+        Returns:
+        - acceleration: numpy.ndarray
+            Calculated accelerations for each vehicle.
+        """
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+        acceleration[s <= 0] = -max_acc  # Handle negative or zero spacing
+        return acceleration
+
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+
+    acc_o = calculate_idm_acceleration(of_v, v, s, idm_params)
+    acc_t = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+    acc_o_after = calculate_idm_acceleration(of_v, or_v, rr_x, idm_params)
+    acc_t_after = calculate_idm_acceleration(tf_v, tr_v, rtr_x, idm_params)
+
+    safety_criterion = (acc_t_after > b_safe) & (acc_o_after > b_safe)
+    delta_acc = acc_t - acc_o
+    delta_acc_o = acc_o_after - or_acc
+    delta_acc_t = acc_t_after - tr_acc
+    incentive_criterion = delta_acc + politeness * (delta_acc_t + delta_acc_o) > acc_thres
+
+    change_decision = np.where(safety_criterion & incentive_criterion, 1, 0)
+    return change_decision
+2024-09-19 23:21:21,166 - research_agent_logger - INFO - Model loss: 0.852
+2024-09-19 23:21:21,167 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.667, Recall: 0.083, F1: 0.148, Specificity: 0.958], Model confusion matrix: [TP: 1234, TN: 14185, FP: 615, FN: 13566]
+2024-09-19 23:21:21,167 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.852, improved rate: -20.60%.
+2024-09-19 23:21:52,938 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the trial logs indicates that the last iteration of the MOBIL model did not meet the desired performance requirements, with a significant deterioration in model loss and recall. Here are the specific reasons for the shortfall and suggestions for further improvement grounded in mathematical formulations:
+
+### Reasons for Low Performance:
+1. **Increased Model Loss and Decreased Recall**: The significant increase in model loss from 0.706 to 0.852 and a drop in recall to 0.083 suggest the model has become overly conservative, potentially due to stringent safety and decision-making criteria. This could be limiting the number of recommended lane changes, missing beneficial opportunities.
+
+2. **Overly Conservative Safety Criteria**: The safety parameters (`b_safe` and `acc_thres`) seem to be set too high, leading to fewer lane changes being recommended. While this approach minimizes the risk of accidents, it also prevents the model from capturing valid lane change opportunities, as evidenced by the low recall.
+
+3. **Static Decision-Making Parameters**: The static nature of decision-making parameters like `politeness`, `b_safe`, and `acc_thres` may not adequately reflect the dynamic conditions of real-world driving, leading to suboptimal decisions.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Thresholds for Decision-Making**: Introduce adaptive thresholds for safety (`b_safe`) and decision-making (`acc_thres`) that respond to real-time traffic conditions. For example, these thresholds could be adjusted based on traffic density, average speed, or observed driving behaviors, allowing for more flexible and context-aware decision-making.
+
+2. **Enhanced Traffic Density Consideration**: Modify the politeness factor to be a function of traffic density or relative speeds. This adjustment could allow the model to make more aggressive lane changes in lighter traffic, potentially improving recall without compromising safety.
+
+3. **Advanced Modeling of Vehicle Interactions**: Extend the model to consider not just the immediate neighboring vehicles but also other nearby vehicles that might be indirectly affected by a lane change. This could involve a more comprehensive analysis of the traffic flow and vehicle interactions within a larger radius.
+
+4. **Refinement of IDM Calculations**: Review and refine the IDM component of the model to better capture the nuances of vehicle acceleration and deceleration in dense traffic scenarios. This might involve adjusting the IDM parameters like `desired_time_window` and `jam_space` based on empirical data of traffic flow under various conditions.
+
+By focusing on these areas, the MOBIL model can potentially achieve a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios. These suggestions adhere to the guidelines of avoiding machine learning techniques and not focusing solely on parameter optimization, providing a concrete path for mathematical enhancements based on the analysis of the log file.
+2024-09-19 23:21:52,941 - research_agent_logger - INFO - New questions: 
+ 1. What specific mathematical formulations are currently used in the model, and are there alternative or complementary theories or formulations that could be integrated to enhance the model's accuracy and robustness?
+
+2. How do the existing mathematical formulations handle anomalies or outliers in the data, and could improvements be made by adopting different or additional mathematical strategies for outlier detection and management?
+
+3. Are there any recent advancements or trends in the mathematical modeling of similar systems by academic or industrial research that have shown promising results which we have not yet considered?
+
+4. Can we identify any limitations or assumptions in our current mathematical model that might be impacting its performance, and how might these be addressed by refining the underlying mathematical theory?
+
+5. How does the scalability of our current mathematical formulations affect performance, and are there known methods to enhance computational efficiency without compromising the integrity of the model?
+2024-09-19 23:21:52,941 - research_agent_logger - INFO - ============ Iteration 3 ============
+2024-09-19 23:22:53,295 - research_agent_logger - INFO - Idea: 
+ To further improve the MOBIL model's performance, the following refined strategies should be considered:
+
+1. **Dynamic Threshold Adjustments**: Implement adaptive thresholds for safety and decision-making parameters like `b_safe` and `acc_thres`. These should dynamically adjust based on real-time data such as traffic density, speed variations, and observed driver behaviors. This approach will allow the model to be more responsive and context-aware, potentially addressing the issues of being overly conservative.
+
+2. **Handling of Anomalies and Outliers**: Develop robust methods to detect and manage anomalies and outliers in the data. This could involve statistical techniques to identify deviations from typical patterns and incorporate mechanisms to adjust model responses accordingly. This will help in maintaining the integrity of decision-making under varied traffic conditions.
+
+3. **Integration of Recent Advancements**: Explore and integrate recent advancements in traffic modeling and computational mathematics that have been successfully applied in similar systems. This can include newer theories in game theory applied to traffic scenarios, or advanced computational techniques that enhance efficiency without compromising model accuracy.
+
+4. **Empirical Validation and Iterative Refinement**: Conduct empirical studies to validate the effectiveness of these adjustments. Use the findings to iteratively refine the model parameters and strategies. This iterative process should focus on balancing safety and operational efficiency while adapting to new insights and technological advancements.
+
+5. **Collaborative Development**: Continue to engage with experts in mathematics, traffic modeling, and computational theory to keep the model at the forefront of technological and theoretical developments. This collaborative approach will help in continuously refining the model based on cutting-edge research and practical feedback.
+
+By focusing on these areas, the MOBIL model can achieve a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios. These suggestions adhere to the guidelines of avoiding machine learning techniques and not focusing solely on parameter optimization, providing a concrete path for mathematical enhancements based on the analysis of the log file.
+2024-09-19 23:23:29,461 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """Improved MOBIL model for lane change decision
+    event_data:  [N, 11] ndarray, event datas for test vehicles, each row contains the following data
+    [
+        v: speed of the following vehicle
+        s: headway distance between the leading and following vehicle
+        of_v: speed of the original lane front vehicle
+        or_v: speed of the original lane rear vehicle
+        tf_v: speed of the target lane front vehicle
+        tr_v: speed of the target lane rear vehicle
+        rtf_x: relative distance to the target lane front vehicle
+        rtr_x: relative distance to the target lane rear vehicle
+        rr_x: relative distance to the rear vehicle
+        or_acc: acceleration of the original lane rear vehicle
+        tr_acc: acceleration of the target lane rear vehicle
+    ]
+    params: Scaler list, parameters for IDM model and improved MOBIL model 
+    [
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, # IDM parameters
+        politeness, b_safe, acc_thres # MOBIL parameters
+    ]
+    """
+    import math
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration of the following vehicle using IDM model
+        leading_v: (N,), ndarray, speed of the leading vehicles
+        v: (N,), ndarray, speed of the following vehicles
+        s: (N,), ndarray, headway distances between the leading and following vehicles
+        params: [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+        """
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+                        
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+
+        # handle the negative spacing
+        acceleration[s <= 0] = -max_acc
+
+        return acceleration
+
+    # Extract event data and parameters
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+
+    change_decision = np.zeros_like(v)
+
+    # Calculate accelerations using IDM for both original and target lanes
+    acc_orig = calculate_idm_acceleration(of_v, v, s, idm_params)
+    acc_target = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+
+    # Calculate the incentive for lane changing
+    delta_acc = acc_target - acc_orig
+    incentive = delta_acc + politeness * (or_acc - tr_acc)
+
+    # Safety check for lane changing
+    is_safe = (tr_acc >= b_safe) & (or_acc >= b_safe) & (delta_acc > acc_thres)
+    
+    # Decision making based on incentive and safety
+    change_decision = (incentive > 0) & is_safe
+
+    return change_decision
+2024-09-19 23:23:46,223 - research_agent_logger - INFO - Model loss: 0.883
+2024-09-19 23:23:46,223 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.641, Recall: 0.065, F1: 0.117, Specificity: 0.964], Model confusion matrix: [TP: 956, TN: 14265, FP: 535, FN: 13844]
+2024-09-19 23:23:46,223 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.883, improved rate: -24.97%.
+2024-09-19 23:24:11,554 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the log file reveals that the MOBIL model iterations consistently failed to meet performance requirements, with specific issues in recall rates and overall model loss. Here��s a detailed breakdown of potential reasons and actionable suggestions:
+
+### Reasons for Low Performance:
+1. **Low Recall**: The consistently low recall across iterations indicates the model's inability to identify valid lane change opportunities. This could stem from overly conservative safety thresholds (`b_safe`) and decision-making criteria (`acc_thres`), which may be too stringent under varying traffic conditions.
+   
+2. **Conservative Decision-Making**: High specificity values suggest the model prioritizes minimizing false positives, potentially at the cost of missing beneficial lane changes. This conservative nature could be due to static parameters that do not adapt to real-time traffic dynamics.
+
+3. **Static Parameters**: The use of static values for parameters like `politeness`, `b_safe`, and `acc_thres` may not reflect the complexity and variability of real-world driving scenarios, leading to suboptimal decisions.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Parameter Adjustment**: Introduce mechanisms for dynamic adjustment of parameters such as `b_safe` and `acc_thres` based on real-time traffic data (e.g., traffic density, average speeds). This could allow the model to adapt its decision criteria to current conditions, potentially improving recall without compromising safety.
+
+2. **Integration of Traffic Density in Decision Criteria**: Adjust the `politeness` factor based on traffic density or relative speeds. This could enable the model to make more aggressive decisions in lighter traffic, improving recall.
+
+3. **Extended Interaction Modeling**: Consider the effects of a broader range of vehicles in the vicinity, not just the immediate neighbors. This could involve analyzing traffic flow and interactions within a larger radius, providing a more comprehensive assessment that might uncover additional safe lane change opportunities.
+
+4. **Empirical Adjustment of IDM Parameters**: Refine the IDM parameters (`desired_time_window`, `jam_space`) based on empirical traffic data to better mimic actual driving conditions. Adjustments should focus on the real-world behavior of traffic flow, potentially improving the accuracy of acceleration and deceleration predictions in the model.
+
+By implementing these suggestions, the MOBIL model can aim for a more balanced performance, enhancing safety and efficiency in lane change decisions across various traffic scenarios. These improvements should focus on making the model more adaptive and responsive to real-time conditions without relying on complex machine learning techniques.
+2024-09-19 23:24:11,555 - research_agent_logger - INFO - New questions: 
+ 1. How can we modify the existing mathematical formulations to enhance their sensitivity to the nuances in the data without introducing complexity that would require advanced computational resources?
+
+2. What are the fundamental limitations of our current mathematical models in capturing the underlying patterns of the problem domain, and how might alternative formulations address these limitations?
+
+3. Are there any recent theoretical advancements or innovative mathematical techniques in similar fields that we can adapt to improve the robustness and accuracy of our model?
+
+4. How can we better integrate domain-specific knowledge into our mathematical formulations to increase their predictive power and reliability?
+
+5. What are the best practices for balancing the trade-off between model simplicity and performance in mathematical formulations, as demonstrated by recent successful applications in related areas?
+2024-09-19 23:24:11,555 - research_agent_logger - INFO - ============ Iteration 4 ============
+2024-09-19 23:24:53,499 - research_agent_logger - INFO - Idea: 
+ The proposed refinements for the MOBIL model based on the insights gathered include:
+1. **Dynamic Parameter Adjustment Using Game Theory**: Integrate game theory to dynamically adjust parameters like `b_safe` and `acc_thres` in response to real-time traffic data. This approach can help the model adapt its decision-making criteria to current traffic conditions, potentially improving recall rates without compromising safety.
+
+2. **Extended Interaction Modeling**: Expand the model's scope to consider interactions within a larger radius, not just immediate neighbors. This broader perspective could uncover additional safe lane change opportunities and provide a more comprehensive assessment of traffic dynamics.
+
+3. **Empirical Adjustment of IDM Parameters**: Refine IDM parameters such as `desired_time_window` and `jam_space` based on empirical traffic data. This step should focus on mimicking real-world driving behaviors more accurately, thus enhancing the predictive accuracy of acceleration and deceleration in the model.
+
+4. **Integration of Cooperative Decision-Making**: Use cooperative decision-making strategies from game theory to make the model less conservative and more responsive to varying traffic conditions. This could involve modeling the interactions between multiple vehicles and adjusting the `politeness` factor based on the overall traffic density and flow.
+
+By implementing these enhancements, the MOBIL model can achieve a more balanced performance, enhancing both safety and efficiency in lane change decisions across various traffic scenarios. These improvements focus on making the model more adaptive, responsive, and empirically grounded without introducing excessive complexity.
+2024-09-19 23:25:58,380 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """Improved MOBIL model for lane change decision.
+    
+    Args:
+        event_data (numpy.ndarray): A [N, 11] matrix containing data for test vehicles. Each row has:
+            - v: Speed of the following vehicle.
+            - s: Headway distance between the leading and following vehicle.
+            - of_v: Speed of the original lane front vehicle.
+            - or_v: Speed of the original lane rear vehicle.
+            - tf_v: Speed of the target lane front vehicle.
+            - tr_v: Speed of the target lane rear vehicle.
+            - rtf_x: Relative distance to the target lane front vehicle.
+            - rtr_x: Relative distance to the target lane rear vehicle.
+            - rr_x: Relative distance to the rear vehicle.
+            - or_acc: Acceleration of the original lane rear vehicle.
+            - tr_acc: Acceleration of the target lane rear vehicle.
+        params (list): Parameters for IDM model and improved MOBIL model:
+            - desired_speed: Desired speed of the vehicle.
+            - jam_space: Minimum desired spacing in traffic jam.
+            - desired_time_window: Desired time headway.
+            - max_acc: Maximum acceleration.
+            - comfort_acc: Comfortable deceleration.
+            - beta: Exponent for speed difference in IDM.
+            - politeness: Politeness factor in MOBIL.
+            - b_safe: Safety threshold for acceleration after lane change.
+            - acc_thres: Acceleration threshold for making a lane change.
+
+    Returns:
+        numpy.ndarray: A vector indicating whether each vehicle should change lanes (1) or not (0).
+    """
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration using the Intelligent Driver Model (IDM).
+        
+        Args:
+            leading_v (numpy.ndarray): Speeds of the leading vehicles.
+            v (numpy.ndarray): Speeds of the following vehicles.
+            s (numpy.ndarray): Headway distances.
+            params (list): IDM parameters [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta].
+        
+        Returns:
+            numpy.ndarray: Accelerations for each vehicle.
+        """
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+                
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+
+        # handle the negative spacing
+        acceleration[s <= 0] = -max_acc
+
+        return acceleration
+
+    # Extract event data and parameters
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+    
+    change_decision = np.zeros_like(v)
+
+    # Calculate accelerations in current and target lanes
+    current_acc = calculate_idm_acceleration(of_v, v, s, idm_params)
+    target_acc = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+    
+    # Calculate accelerations for rear vehicles in original and target lanes after a hypothetical lane change
+    new_or_acc = calculate_idm_acceleration(v, or_v, rr_x, idm_params)
+    new_tr_acc = calculate_idm_acceleration(v, tr_v, rtr_x, idm_params)
+    
+    # Calculate incentive and safety criteria
+    incentive_criterion = target_acc - current_acc + politeness * (new_tr_acc - tr_acc + new_or_acc - or_acc)
+    safety_criterion = (new_tr_acc > b_safe) & (new_or_acc > b_safe)
+    
+    # Apply decisions based on MOBIL model criteria
+    change_decision[(incentive_criterion > acc_thres) & safety_criterion] = 1
+
+    return change_decision
+2024-09-19 23:26:21,837 - research_agent_logger - INFO - Model loss: 0.850
+2024-09-19 23:26:21,837 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.646, Recall: 0.085, F1: 0.150, Specificity: 0.953], Model confusion matrix: [TP: 1259, TN: 14109, FP: 691, FN: 13541]
+2024-09-19 23:26:21,838 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.850, improved rate: -20.30%.
+2024-09-19 23:26:49,239 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the trial logs highlights several key issues contributing to the low performance of the MOBIL model iterations, particularly in terms of recall and model loss. Here are the identified reasons and specific suggestions for improvement:
+
+### Reasons for Low Performance:
+1. **Conservatism in Safety and Decision Parameters**: The overly conservative settings for `b_safe` and `acc_thres` may be restricting the model's ability to recommend beneficial lane changes. This is evidenced by the consistently low recall rates, indicating missed opportunities for lane changes that could be safe and advantageous.
+
+2. **Static Nature of Parameters**: The parameters such as `politeness`, `b_safe`, and `acc_thres` are static and do not adapt to varying traffic conditions, which may not accurately reflect the dynamic nature of real-world driving environments.
+
+3. **Limited Interaction Scope**: The current model primarily considers immediate neighboring vehicles. This limited scope might overlook broader traffic dynamics that could influence safer and more efficient lane change decisions.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Adjustment of Parameters**: Introduce adaptive mechanisms for `b_safe` and `acc_thres` that respond to real-time traffic data, such as traffic density and speed variations. This adaptation could make the decision-making process more responsive to actual traffic conditions, potentially improving recall without compromising safety.
+
+2. **Enhanced Interaction Modeling**: Expand the model to consider interactions within a larger radius, not just immediate neighbors. This broader assessment could reveal additional safe lane change opportunities by providing a more comprehensive understanding of traffic dynamics.
+
+3. **Incorporation of Empirical Traffic Data**: Refine IDM parameters like `desired_time_window` and `jam_space` based on empirical traffic data to better mimic real-world driving behaviors. This could enhance the model's predictions of vehicle accelerations and decelerations, aligning them more closely with actual driver responses.
+
+4. **Use of Non-linear Dynamics**: Explore the integration of non-linear dynamics and chaos theory in modeling traffic flow, which might capture the complex behaviors seen in dense traffic more effectively than current linear models.
+
+By addressing these areas, the MOBIL model can aim for a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios. These improvements should focus on making the model more adaptive and responsive to real-time conditions, grounded in robust mathematical formulations.
+2024-09-19 23:26:49,242 - research_agent_logger - INFO - New questions: 
+ 1. **Exploration of Mathematical Formulations**: What specific mathematical formulations are currently being used in our model, and how might alternative or additional mathematical theories (such as non-linear dynamics, stochastic processes, or optimization algorithms) enhance the model's performance?
+
+2. **Comparison with Industry Standards**: Are there existing mathematical models within our industry that consistently show superior performance, and what elements of their mathematical formulations can be adapted or integrated into our model to improve its efficacy?
+
+3. **Theoretical Limitations**: What are the theoretical limitations or constraints of the current mathematical formulations used in our model, and how could these limitations be addressed or mitigated in future revisions?
+
+4. **Cross-disciplinary Insights**: Can insights from other fields such as physics, economics, or biology provide innovative perspectives or techniques that could be applied to our mathematical formulations to enhance performance?
+
+5. **Historical Evolution of Model Formulations**: How have the mathematical formulations in our model evolved over time in response to performance challenges, and what historical strategies or adjustments have led to significant breakthroughs in similar models?
+2024-09-19 23:26:49,242 - research_agent_logger - INFO - ============ Iteration 5 ============
+2024-09-19 23:27:30,209 - research_agent_logger - INFO - Idea: 
+ To enhance the MOBIL model's performance in automated vehicle lane changes, the following refined proposals are suggested:
+
+1. **Integration of Non-linear Dynamics**: Incorporate non-linear dynamics into the MOBIL model to better capture the complex behaviors observed in dense traffic scenarios. This could involve using particle methods for fluid-like macroscopic traffic models, which preserve mechanical energy decay and differential inequalities.
+
+2. **Adoption of Stochastic Processes**: Implement stochastic processes to model the variability and uncertainty inherent in real-world driving behaviors and traffic conditions. This could improve the model��s ability to predict vehicle interactions and decisions under varying traffic conditions.
+
+3. **Advanced Prediction Algorithms**: Utilize advanced prediction algorithms that consider the dynamics of the leading vehicle and other surrounding traffic. This approach can enhance the model's predictive accuracy and responsiveness to dynamic traffic scenarios.
+
+4. **Hybrid Modeling Approaches**: Explore hybrid traffic flow models that combine macroscopic and microscopic elements. These models can provide a more comprehensive view of traffic dynamics, allowing the MOBIL model to make more informed lane change decisions based on a wider range of traffic data.
+
+5. **Cross-disciplinary Insights**: Leverage insights from fields such as physics and biology to introduce new perspectives or techniques in the mathematical formulations of the MOBIL model. For example, concepts from fluid dynamics or behavioral models from biology could provide innovative ways to model traffic flow and vehicle interactions.
+
+By implementing these refined proposals, the MOBIL model can achieve a more balanced and enhanced performance, improving safety and efficiency in lane change decisions across various traffic scenarios.
+2024-09-19 23:27:58,353 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """Improved MOBIL model for lane change decision
+    event_data:  [N, 11] ndarray, event datas for test vehicles, each row contains the following data
+    [
+        v: speed of the following vehicle
+        s: headway distance between the leading and following vehicle
+        of_v: speed of the original lane front vehicle
+        or_v: speed of the original lane rear vehicle
+        tf_v: speed of the target lane front vehicle
+        tr_v: speed of the target lane rear vehicle
+        rtf_x: relative distance to the target lane front vehicle
+        rtr_x: relative distance to the target lane rear vehicle
+        rr_x: relative distance to the rear vehicle
+        or_acc: acceleration of the original lane rear vehicle
+        tr_acc: acceleration of the target lane rear vehicle
+    ]
+    params: Scaler list, parameters for IDM model and improved MOBIL model 
+    [
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, # IDM parameters
+        politeness, b_safe, acc_thres # MOBIL parameters # MOBIL parameters
+    ]
+    """
+
+    import math
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration of the following vehicle using IDM model
+        leading_v: (N,), ndarray, speed of the leading vehicles
+        v: (N,), ndarray, speed of the following vehicles
+        s: (N,), ndarray, headway distances between the leading and following vehicles
+        params: [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+        """
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+                
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+
+        # handle the negative spacing
+        acceleration[s <= 0] = -max_acc
+
+        return acceleration
+
+    # Extract event data and parameters
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+    
+    # Calculate accelerations using IDM for original and target lanes
+    acc_orig = calculate_idm_acceleration(of_v, v, s, idm_params)
+    acc_target = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+
+    # Calculate incentive criterion
+    delta_acc = acc_target - acc_orig
+    delta_acc_rear = calculate_idm_acceleration(v, tr_v, rtr_x, idm_params) - tr_acc
+    
+    # Safety criterion
+    safety_criterion = (delta_acc_rear > b_safe)
+
+    # Incentive criterion
+    incentive_criterion = (delta_acc + politeness * (delta_acc_rear - or_acc)) > acc_thres
+
+    # Decision making
+    change_decision = (incentive_criterion & safety_criterion).astype(int)
+
+    return change_decision
+2024-09-19 23:28:20,216 - research_agent_logger - INFO - Model loss: 0.785
+2024-09-19 23:28:20,217 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.672, Recall: 0.128, F1: 0.215, Specificity: 0.938], Model confusion matrix: [TP: 1889, TN: 13880, FP: 920, FN: 12911]
+2024-09-19 23:28:20,217 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.785, improved rate: -11.21%.
+2024-09-19 23:28:47,436 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the trial logs indicates that the MOBIL model iterations did not meet the expected performance requirements, primarily due to issues with recall and overall model loss. Here's a breakdown of potential reasons and specific suggestions for improvement:
+
+### Reasons for Low Performance:
+1. **Conservative Safety Parameters**: The model's conservative nature, particularly the high thresholds for `b_safe` and `acc_thres`, likely restricts its ability to recommend beneficial lane changes. This is evident from the consistently low recall rates, suggesting that the model misses opportunities for safe and advantageous lane changes.
+
+2. **Static Parameters**: The parameters such as `politeness`, `b_safe`, and `acc_thres` are static and do not adapt to the dynamic nature of real-world driving environments, potentially leading to decisions that do not reflect the actual traffic conditions.
+
+3. **Limited Interaction Modeling**: The model primarily considers the immediate neighboring vehicles. This limited scope might not adequately capture broader traffic dynamics that could influence safer and more efficient lane change decisions.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Adjustment of Parameters**: Implement adaptive mechanisms for `b_safe` and `acc_thres` that respond to real-time traffic data, such as traffic density and speed variations. This adaptation could make the decision-making process more responsive to actual traffic conditions, potentially improving recall without compromising safety.
+
+2. **Enhanced Interaction Modeling**: Expand the model to consider interactions within a larger radius, not just immediate neighbors. This broader assessment could reveal additional safe lane change opportunities by providing a more comprehensive understanding of traffic dynamics.
+
+3. **Incorporation of Empirical Traffic Data**: Refine IDM parameters like `desired_time_window` and `jam_space` based on empirical traffic data to better mimic real-world driving behaviors. This could enhance the model's predictions of vehicle accelerations and decelerations, aligning them more closely with actual driver responses.
+
+4. **Use of Non-linear Dynamics**: Explore the integration of non-linear dynamics and chaos theory in modeling traffic flow, which might capture the complex behaviors seen in dense traffic more effectively than current linear models.
+
+By addressing these areas, the MOBIL model can aim for a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios. These improvements should focus on making the model more adaptive and responsive to real-time conditions, grounded in robust mathematical formulations.
+2024-09-19 23:28:47,439 - research_agent_logger - INFO - New questions: 
+ 1. How can we modify the existing mathematical formulations to enhance their adaptability to varying conditions without relying on machine learning techniques?
+2. What are the theoretical limitations of our current mathematical models, and can we integrate alternative mathematical strategies that have proven effective in similar contexts?
+3. Are there recent advancements in non-machine learning mathematical models within our field that we have not yet considered or implemented?
+4. How do our mathematical formulations handle non-linearities and multi-dimensional data, and could the incorporation of advanced statistical models offer a robust solution?
+5. Can we identify any successful mathematical approaches used in other industries or disciplines that could be adapted to improve the accuracy and efficiency of our model?
+2024-09-19 23:28:47,440 - research_agent_logger - INFO - ============ Iteration 6 ============
+2024-09-19 23:29:24,245 - research_agent_logger - INFO - Idea: 
+ To further refine the MOBIL model and address its limitations, the following strategies can be implemented based on the insights gathered:
+
+1. **Dynamic Model Integration**: Incorporate dynamic mathematical models that adjust parameters like `b_safe` and `acc_thres` based on real-time traffic data. This will allow the MOBIL model to adapt its decision-making process to actual traffic conditions, enhancing its responsiveness and accuracy.
+
+2. **Continuum Modeling**: Utilize continuum models to evolve aggregated quantities such as vehicle density and mean vehicle velocity. This approach will help in capturing broader traffic dynamics and providing a more comprehensive analysis of traffic flow, which is crucial for making informed lane change decisions.
+
+3. **Iterative Model Updates**: Implement an iterative update mechanism in the MOBIL model, which continuously refines its parameters and strategies based on ongoing traffic data analysis. This will ensure that the model remains effective under varying traffic conditions and can respond to changes in traffic patterns over time.
+
+4. **Intelligent Decision-Making Algorithms**: Integrate intelligent decision-making algorithms that optimize traffic flow and manage congestion effectively. These algorithms can help in making proactive lane change decisions that are beneficial for overall traffic efficiency and safety.
+
+5. **Non-linear Dynamics and Chaos Theory**: Explore the application of non-linear dynamics and chaos theory in modeling traffic flow. This could provide a more accurate representation of the complex behaviors observed in dense traffic scenarios, enhancing the predictive capabilities of the MOBIL model.
+
+By implementing these strategies, the MOBIL model can achieve a more robust and adaptive performance, improving safety and efficiency in lane change decisions across various traffic scenarios.
+2024-09-19 23:30:27,100 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """Improved MOBIL model for lane change decision.
+    
+    Args:
+        event_data (numpy.ndarray): An array of shape [N, 11] containing data for N vehicles. Each row contains:
+            - v: Speed of the following vehicle.
+            - s: Headway distance between the leading and following vehicle.
+            - of_v: Speed of the original lane front vehicle.
+            - or_v: Speed of the original lane rear vehicle.
+            - tf_v: Speed of the target lane front vehicle.
+            - tr_v: Speed of the target lane rear vehicle.
+            - rtf_x: Relative distance to the target lane front vehicle.
+            - rtr_x: Relative distance to the target lane rear vehicle.
+            - rr_x: Relative distance to the rear vehicle in the original lane.
+            - or_acc: Acceleration of the original lane rear vehicle.
+            - tr_acc: Acceleration of the target lane rear vehicle.
+        params (list): A list of parameters for the IDM and MOBIL models:
+            - desired_speed: Desired speed of vehicles.
+            - jam_space: Minimum desired spacing in jam traffic conditions.
+            - desired_time_window: Desired time headway.
+            - max_acc: Maximum acceleration.
+            - comfort_acc: Comfortable deceleration.
+            - beta: Exponent for speed difference in IDM.
+            - politeness: Politeness factor in MOBIL.
+            - b_safe: Safety threshold.
+            - acc_thres: Acceleration threshold for making a lane change.
+    
+    Returns:
+        numpy.ndarray: An array of integers (0 or 1) indicating lane change decisions for each vehicle.
+    """
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration using the Intelligent Driver Model (IDM)."""
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - (v * delta_v) / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - (v / (desired_speed + 1e-6)) ** beta - (s_star / (s + 1e-6)) ** 2)
+        acceleration[s <= 0] = -max_acc  # Handle negative or zero spacing
+        return acceleration
+
+    # Unpack event data and parameters
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+
+    # Calculate accelerations in original and target lanes using IDM
+    original_lane_acceleration = calculate_idm_acceleration(of_v, v, s, idm_params)
+    target_lane_acceleration = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+
+    # Calculate the incentive criterion for lane changing
+    delta_a = target_lane_acceleration - original_lane_acceleration
+    safety_criterion = (tr_v - v > b_safe) & (or_v - v > b_safe)  # Corrected to compare speeds, not accelerations
+
+    # Calculate the politeness term
+    politeness_term = politeness * (tr_acc - or_acc)
+
+    # Decision to change lane based on MOBIL
+    change_decision = (delta_a + politeness_term > acc_thres) & safety_criterion
+
+    return change_decision.astype(int)
+2024-09-19 23:30:44,380 - research_agent_logger - INFO - Model loss: 0.762
+2024-09-19 23:30:44,381 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.636, Recall: 0.146, F1: 0.238, Specificity: 0.916], Model confusion matrix: [TP: 2166, TN: 13560, FP: 1240, FN: 12634]
+2024-09-19 23:30:44,381 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.762, improved rate: -7.90%.
+2024-09-19 23:31:13,274 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the trial logs reveals that the MOBIL model iterations did not meet performance requirements primarily due to low recall and increased model loss. Here are the specific reasons and suggestions for improvement based on the logs:
+
+### Reasons for Low Performance:
+1. **Conservative Safety Parameters**: The high thresholds for `b_safe` and `acc_thres` might be overly conservative, restricting the model from recommending beneficial lane changes, as evidenced by low recall rates.
+   
+2. **Static Parameters**: The static nature of parameters such as `politeness`, `b_safe`, and `acc_thres` does not reflect the dynamic real-world driving environments, potentially leading to non-optimal decisions.
+
+3. **Limited Interaction Scope**: The model's focus on immediate neighbors might not capture broader traffic dynamics, missing safer and more efficient lane change opportunities.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Model Integration**: Implement dynamic mathematical models that adjust `b_safe` and `acc_thres` based on real-time traffic data. This could enhance responsiveness and decision accuracy relative to actual traffic conditions.
+
+2. **Enhanced Interaction Modeling**: Broaden the scope to include interactions within a larger radius, not just immediate neighbors. This could provide a more comprehensive view of traffic dynamics, revealing additional safe lane change opportunities.
+
+3. **Non-linear Dynamics and Chaos Theory**: Integrate non-linear dynamics and chaos theory to better model the complex behaviors observed in dense traffic. This could improve the predictive accuracy of the model.
+
+4. **Continuum and Hybrid Modeling Approaches**: Utilize continuum models to capture aggregated traffic dynamics like vehicle density and mean velocity. Also, explore hybrid models combining macroscopic and microscopic traffic elements for a more comprehensive traffic analysis.
+
+By focusing on these areas, the MOBIL model can potentially achieve a more balanced performance, enhancing safety and efficiency in lane change decisions across diverse traffic scenarios.
+2024-09-19 23:31:13,275 - research_agent_logger - INFO - New questions: 
+ 1. How do the underlying assumptions of our mathematical model influence its performance, and are there alternative mathematical theories or formulations that could better accommodate the complexities of our specific application?
+
+2. What are the limitations of the current mathematical formulations in capturing the dynamic behaviors or interactions in the system, and how might other non-linear or stochastic models provide improved accuracy?
+
+3. Are there recent advancements or successful applications of similar mathematical models in other fields that we haven't considered, which could provide insights or methodologies adaptable to our model?
+
+4. How does the scalability of our current mathematical model affect its performance, and can modifications or simplifications be made to enhance its applicability without compromising accuracy?
+
+5. What are the most critical variables or parameters in our model that significantly impact its outcomes, and how can we better understand their interactions or dependencies through theoretical or empirical studies?
+2024-09-19 23:31:13,276 - research_agent_logger - INFO - ============ Iteration 7 ============
+2024-09-19 23:31:49,027 - research_agent_logger - INFO - Idea: 
+ To further refine the MOBIL model and improve its performance, the following strategies can be proposed:
+1. **Incorporate Game Theory**: Utilize game theory to model cooperative decisions among multiple vehicles. This can help in making more strategic lane change decisions that consider the actions and reactions of other drivers, potentially leading to safer and more efficient traffic flow.
+2. **Consider both Transverse and Longitudinal Accelerations**: By taking into account both types of accelerations in the decision-making process, the model can better simulate real-world driving dynamics, which may enhance the accuracy and effectiveness of lane change recommendations.
+3. **Dynamic Parameter Adjustment**: Implement mechanisms for dynamic adjustment of parameters such as `b_safe`, `acc_thres`, and `politeness` based on real-time data and broader traffic conditions. This can make the model more adaptable to varying traffic scenarios.
+4. **Expand Interaction Scope**: Broaden the model's scope to include interactions within a larger radius, not just immediate neighbors. This can provide a more comprehensive view of traffic dynamics and uncover additional safe lane change opportunities.
+5. **Hybrid Modeling Approaches**: Explore hybrid models combining macroscopic and microscopic traffic elements, potentially integrating continuum models to capture aggregated traffic dynamics like vehicle density and mean velocity.
+
+These strategies aim to address the specific reasons for low performance identified in the trial logs and align with the new questions raised by the Analyzer, thereby enhancing the MOBIL model's safety and efficiency in lane change decisions across diverse traffic scenarios.
+2024-09-19 23:32:53,528 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """Improved MOBIL model for lane change decision.
+    
+    Args:
+        event_data (ndarray): A [N, 11] ndarray containing event data for test vehicles. Each row includes:
+            v: speed of the following vehicle
+            s: headway distance between the leading and following vehicle
+            of_v: speed of the original lane front vehicle
+            or_v: speed of the original lane rear vehicle
+            tf_v: speed of the target lane front vehicle
+            tr_v: speed of the target lane rear vehicle
+            rtf_x: relative distance to the target lane front vehicle
+            rtr_x: relative distance to the target lane rear vehicle
+            rr_x: relative distance to the rear vehicle
+            or_acc: acceleration of the original lane rear vehicle
+            tr_acc: acceleration of the target lane rear vehicle
+        params (list): Scalar list of parameters for IDM model and improved MOBIL model:
+            desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, # IDM parameters
+            politeness, b_safe, acc_thres # MOBIL parameters
+
+    Returns:
+        ndarray: An array of decisions (0 or 1) where 1 indicates a lane change.
+    """
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration using the Intelligent Driver Model (IDM).
+        
+        Args:
+            leading_v (ndarray): Speeds of the leading vehicles.
+            v (ndarray): Speeds of the following vehicles.
+            s (ndarray): Headway distances between the leading and following vehicles.
+            params (list): IDM parameters [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta].
+        
+        Returns:
+            ndarray: Accelerations calculated using IDM.
+        """
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+                
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+
+        # Handle the negative spacing
+        acceleration[s <= 0] = -max_acc
+
+        return acceleration
+    
+    # Extract event data and parameters
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+    
+    # Calculate accelerations
+    acc_orig = calculate_idm_acceleration(of_v, v, s, idm_params)
+    acc_target = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)
+    acc_follow_orig = calculate_idm_acceleration(v, or_v, rr_x, idm_params)
+    acc_follow_target = calculate_idm_acceleration(v, tr_v, rtr_x, idm_params)
+    
+    # Incentive criterion for lane changing
+    incentive = acc_target - acc_orig + politeness * (acc_follow_target - acc_follow_orig + tr_acc - or_acc)
+    
+    # Safety criterion for lane changing
+    safety = (acc_follow_target > b_safe) & (acc_target > acc_thres)
+    
+    # Decision making
+    change_decision = (incentive > 0) & safety
+    
+    return change_decision.astype(int)
+2024-09-19 23:33:21,038 - research_agent_logger - INFO - Model loss: 0.775
+2024-09-19 23:33:21,039 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.688, Recall: 0.134, F1: 0.225, Specificity: 0.939], Model confusion matrix: [TP: 1988, TN: 13897, FP: 903, FN: 12812]
+2024-09-19 23:33:21,039 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.775, improved rate: -9.76%.
+2024-09-19 23:33:44,934 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the trial logs from the MOBIL model iterations indicates that despite various enhancements, the performance requirements were not met, primarily due to low recall rates and increased model loss. Here are the specific reasons and suggestions for further improvement:
+
+### Reasons for Low Performance:
+1. **Conservative Safety Parameters**: The high thresholds for `b_safe` and `acc_thres` might be overly conservative, restricting the model from recommending beneficial lane changes. This is evidenced by consistently low recall rates, indicating missed opportunities for safe and advantageous lane changes.
+
+2. **Static Parameters**: Parameters such as `politeness`, `b_safe`, and `acc_thres` are static and do not adapt to the dynamic nature of real-world driving environments, potentially leading to decisions that do not reflect the actual traffic conditions.
+
+3. **Limited Interaction Scope**: The model primarily considers the immediate neighboring vehicles. This limited scope might not adequately capture broader traffic dynamics that could influence safer and more efficient lane change decisions.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Model Integration**: Implement dynamic mathematical models that adjust `b_safe` and `acc_thres` based on real-time traffic data. This adaptation could make the decision-making process more responsive to actual traffic conditions, potentially improving recall without compromising safety.
+
+2. **Enhanced Interaction Modeling**: Expand the model to consider interactions within a larger radius, not just immediate neighbors. This broader assessment could reveal additional safe lane change opportunities by providing a more comprehensive understanding of traffic dynamics.
+
+3. **Incorporation of Empirical Traffic Data**: Refine IDM parameters like `desired_time_window` and `jam_space` based on empirical traffic data to better mimic real-world driving behaviors. This could enhance the model's predictions of vehicle accelerations and decelerations, aligning them more closely with actual driver responses.
+
+4. **Use of Non-linear Dynamics**: Explore the integration of non-linear dynamics and chaos theory in modeling traffic flow, which might capture the complex behaviors seen in dense traffic more effectively than current linear models.
+
+By focusing on these areas, the MOBIL model can aim for a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios. These improvements should focus on making the model more adaptive and responsive to real-time conditions, grounded in robust mathematical formulations.
+2024-09-19 23:33:44,936 - research_agent_logger - INFO - New questions: 
+ 1. How do the current mathematical formulations in our model compare with the latest theoretical advancements in similar fields of study? Are there newer, perhaps more efficient or accurate, mathematical theories that we have not yet considered?
+
+2. What specific mathematical assumptions are we currently making in our formulations that could be limiting the model's performance? Are there alternative assumptions that could be tested to potentially enhance the accuracy or efficiency of the model?
+
+3. Can we identify any recent successful mathematical models in related fields? What specific mathematical strategies or formulations do these models employ that might be adapted or integrated into our model to improve its performance?
+
+4. Are there any overlooked mathematical relationships or interactions within our model that could be further explored to enhance understanding and performance? How can these relationships be more rigorously tested or validated against theoretical predictions?
+
+5. What are the current limitations in the scalability of our mathematical formulations, and how might these impact the overall performance of the model? Are there known mathematical techniques or modifications that could help overcome these scalability issues?
+2024-09-19 23:33:44,937 - research_agent_logger - INFO - ============ Iteration 8 ============
+2024-09-19 23:34:28,986 - research_agent_logger - INFO - Idea: 
+ To further improve the MOBIL model's performance, consider the following refined strategies:
+1. **Dynamic Data-Driven Parameter Adjustment**: Implement dynamic models that continuously adjust parameters like `b_safe` and `acc_thres` based on real-time traffic data and driver behavior analytics. This approach can make the model more responsive and accurate in diverse traffic conditions.
+2. **Expanded Interaction Modeling**: Increase the interaction radius in the model to include more vehicles and traffic elements. This broader scope could help in identifying more opportunities for safe and efficient lane changes by providing a comprehensive view of traffic dynamics.
+3. **Integration of Non-linear Dynamics and AI**: Incorporate non-linear dynamics and artificial intelligence techniques to better capture the complex behaviors observed in dense traffic scenarios. This could enhance the model's predictive accuracy and decision-making capabilities.
+4. **Reevaluation of Mathematical Assumptions**: Reassess and possibly revise the mathematical assumptions currently used in the model, such as the constancy of parameters and the homogeneity of traffic flow. Testing alternative assumptions based on empirical data might lead to significant improvements in model performance.
+5. **Use of Empirical and Computational Traffic Data**: Enhance the model's formulations by integrating empirical traffic data and computational techniques for traffic flow prediction. This can help in fine-tuning the model's predictions to align more closely with actual traffic behaviors and conditions.
+
+These strategies are designed to address the specific shortcomings identified in the trial logs and suggestions from the Analyzer, aiming to achieve a more balanced, adaptive, and efficient performance in lane change decisions across various traffic scenarios.
+2024-09-19 23:35:54,525 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """
+    Improved MOBIL model for lane change decision using the Intelligent Driver Model (IDM) and politeness factors.
+    
+    Args:
+        event_data: (N, 11) ndarray, event data for test vehicles, each row contains:
+            [
+                v: speed of the following vehicle (m/s),
+                s: headway distance between the leading and following vehicle (m),
+                of_v: speed of the original lane front vehicle (m/s),
+                or_v: speed of the original lane rear vehicle (m/s),
+                tf_v: speed of the target lane front vehicle (m/s),
+                tr_v: speed of the target lane rear vehicle (m/s),
+                rtf_x: relative distance to the target lane front vehicle (m),
+                rtr_x: relative distance to the target lane rear vehicle (m),
+                rr_x: relative distance to the rear vehicle in the original lane (m),
+                or_acc: acceleration of the original lane rear vehicle (m/s^2),
+                tr_acc: acceleration of the target lane rear vehicle (m/s^2)
+            ]
+        params: List, parameters for IDM model and improved MOBIL model:
+            [
+                desired_speed (m/s), 
+                jam_space (m), 
+                desired_time_window (s), 
+                max_acc (m/s^2), 
+                comfort_acc (m/s^2), 
+                beta (dimensionless), 
+                politeness (dimensionless), 
+                b_safe (m/s^2), 
+                acc_thres (m/s^2)
+            ]
+
+    Returns:
+        change_decision: (N,), ndarray, binary decisions for lane changes (1 for change, 0 for stay)
+    """
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration using the Intelligent Driver Model (IDM)."""
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+        
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+        
+        # Handle negative or zero spacing
+        if s <= 0:
+            acceleration = -max_acc
+        
+        return acceleration
+    
+    # Unpack event data
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    
+    # IDM parameters for acceleration calculations
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+    
+    # Calculate accelerations
+    acc_following = np.array([calculate_idm_acceleration(of_v[i], v[i], s[i], idm_params) for i in range(len(v))])
+    acc_original_rear = np.array([calculate_idm_acceleration(v[i], or_v[i], rr_x[i], idm_params) for i in range(len(v))])
+    acc_target_rear = np.array([calculate_idm_acceleration(tf_v[i], tr_v[i], rtr_x[i], idm_params) for i in range(len(v))])
+    
+    # Calculate incentives for lane changing
+    incentive = acc_target_rear - acc_following + politeness * (acc_original_rear - tr_acc)
+    
+    # Safety criterion based on dynamic thresholds
+    safety_criterion = (acc_target_rear > b_safe) & (acc_target_rear - acc_following > acc_thres)
+    
+    # Decision making
+    change_decision = (incentive > 0) & safety_criterion
+    
+    return change_decision.astype(int)
+2024-09-19 23:45:34,748 - research_agent_logger - INFO - Model loss: 0.669
+2024-09-19 23:45:34,758 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.655, Recall: 0.221, F1: 0.331, Specificity: 0.884], Model confusion matrix: [TP: 3271, TN: 13078, FP: 1722, FN: 11529]
+2024-09-19 23:45:34,758 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.669, improved rate:  5.21%.
+2024-09-19 23:45:59,996 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the MOBIL model iterations, particularly the last trial, reveals that despite improvements in some metrics, performance requirements were not fully met due to persistent issues primarily related to low recall and increased model loss.
+
+### Reasons for Low Performance:
+1. **Conservative Safety Parameters**: The parameters `b_safe` and `acc_thres` appear to be set conservatively. This restricts the model's ability to recommend beneficial lane changes, as evidenced by the low recall rates, indicating missed opportunities for safe and advantageous lane changes.
+
+2. **Static Parameters**: The parameters such as `politeness`, `b_safe`, and `acc_thres` remain static and do not adapt to dynamic driving environments, potentially leading to decisions that do not optimally reflect actual traffic conditions.
+
+3. **Limited Interaction Scope**: The model's primary consideration of immediate neighboring vehicles might not capture broader traffic dynamics that could influence safer and more efficient lane change decisions.
+
+### Suggestions for Further Improvement:
+1. **Dynamic Model Integration**: Implement dynamic models that adjust `b_safe` and `acc_thres` based on real-time traffic data. This adaptation could make the decision-making process more responsive to actual traffic conditions, potentially improving recall without compromising safety.
+
+2. **Enhanced Interaction Modeling**: Expand the model to consider interactions within a larger radius, not just immediate neighbors. This broader assessment could reveal additional safe lane change opportunities by providing a more comprehensive understanding of traffic dynamics.
+
+3. **Incorporation of Empirical Traffic Data**: Refine IDM parameters like `desired_time_window` and `jam_space` based on empirical traffic data to better mimic real-world driving behaviors. This could enhance the model's predictions of vehicle accelerations and decelerations, aligning them more closely with actual driver responses.
+
+4. **Use of Non-linear Dynamics**: Explore the integration of non-linear dynamics and chaos theory in modeling traffic flow, which might capture the complex behaviors seen in dense traffic more effectively than current linear models.
+
+By focusing on these areas, the MOBIL model can aim for a more balanced performance, enhancing both safety and efficiency in lane change decisions across diverse traffic scenarios. These improvements should focus on making the model more adaptive and responsive to real-time conditions, grounded in robust mathematical formulations.
+2024-09-19 23:45:59,997 - research_agent_logger - INFO - New questions: 
+ 1. How can we modify the existing mathematical formulations to enhance their robustness in different operational scenarios, particularly under extreme or unusual conditions?
+
+2. What are the fundamental limitations of the current mathematical models in capturing the complexity of the system being modeled, and how might alternative mathematical approaches address these limitations?
+
+3. Are there any recent theoretical advancements or innovative mathematical techniques in related fields that could be adapted to improve the accuracy and efficiency of our model?
+
+4. How do current mathematical models handle the integration and interaction of multiple variables and systems, and could a reevaluation of these interaction models lead to significant performance improvements?
+
+5. What are the emerging trends and recent successful case studies in the application of non-machine learning mathematical models in similar domains, and what can we learn from these approaches to enhance our own model?
+2024-09-19 23:45:59,998 - research_agent_logger - INFO - ============ Iteration 9 ============
+2024-09-19 23:46:37,521 - research_agent_logger - INFO - Idea: 
+ To further refine the MOBIL model's performance, the following refined strategies are proposed:
+1. **Dynamic Adaptation Using Machine Learning**: Implement machine learning algorithms to dynamically adjust parameters such as `b_safe` and `acc_thres` based on real-time traffic data, enhancing responsiveness to changing traffic conditions.
+2. **Deep Learning for Complex Traffic Dynamics**: Integrate deep learning techniques to better capture and predict complex behaviors in dense traffic scenarios, improving the model��s predictive accuracy and decision-making capabilities.
+3. **Advanced Optimization Techniques**: Utilize optimization techniques to solve complex problems related to vehicle routing and scheduling, which could enhance the overall efficiency of the traffic system.
+4. **Empirical Data Integration**: Continue to refine IDM parameters such as `desired_time_window` and `jam_space` based on empirical traffic data to more closely mimic real-world driving behaviors.
+5. **Comprehensive Interaction Modeling**: Expand the interaction radius in the model to include a broader range of vehicles and traffic elements, using insights from game theory and cooperative strategies observed in ICVs to identify more opportunities for safe and efficient lane changes.
+
+These improvements aim to make the MOBIL model more adaptive, robust, and efficient in handling diverse traffic scenarios, thereby addressing the shortcomings identified in previous iterations and aligning with the latest advancements in traffic modeling research.
+2024-09-19 23:47:05,067 - research_agent_logger - INFO - Code: 
+ def Improved_MOBIL(event_data, params):
+    """Improved MOBIL model for lane change decision
+        event_data:  [N, 11] ndarray, event data for test vehicles, each row contains the following data
+        [
+            v: speed of the following vehicle
+            s: headway distance between the leading and following vehicle
+            of_v: speed of the original lane front vehicle
+            or_v: speed of the original lane rear vehicle
+            tf_v: speed of the target lane front vehicle
+            tr_v: speed of the target lane rear vehicle
+            rtf_x: relative distance to the target lane front vehicle
+            rtr_x: relative distance to the target lane rear vehicle
+            rr_x: relative distance to the rear vehicle
+            or_acc: acceleration of the original lane rear vehicle
+            tr_acc: acceleration of the target lane rear vehicle
+        ]
+        params: Scalar list, parameters for IDM model and improved MOBIL model 
+        [
+            desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, # IDM parameters
+            politeness, b_safe, acc_thres # MOBIL parameters
+        ]
+    """
+
+    import math
+    import numpy as np
+
+    def calculate_idm_acceleration(leading_v, v, s, params):
+        """Calculate acceleration of the following vehicle using IDM model
+            leading_v: (N,), ndarray, speed of the leading vehicles
+            v: (N,), ndarray, speed of the following vehicles
+            s: (N,), ndarray, headway distances between the leading and following vehicles
+            params: [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+        """
+        desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta = params
+                        
+        delta_v = leading_v - v
+        s_star = jam_space + np.maximum(0, v * desired_time_window - v * delta_v / (2 * np.sqrt(max_acc * comfort_acc)))
+        acceleration = max_acc * (1 - np.power(v / (desired_speed + 1e-6), beta) - np.power(s_star / (s + 1e-6), 2))
+
+        # handle the negative spacing
+        acceleration[s <= 0] = -max_acc
+
+        return acceleration
+     
+    # Extract event data and parameters
+    v, s, of_v, or_v, tf_v, tr_v, rtf_x, rtr_x, rr_x, or_acc, tr_acc = event_data.T
+    desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta, politeness, b_safe, acc_thres = params
+    idm_params = [desired_speed, jam_space, desired_time_window, max_acc, comfort_acc, beta]
+    
+    change_decision = np.zeros_like(v)
+
+    # Calculate accelerations using IDM for different scenarios
+    a_f = calculate_idm_acceleration(of_v, v, s, idm_params)  # Acceleration in the current lane
+    a_n = calculate_idm_acceleration(tf_v, v, rtf_x, idm_params)  # Acceleration in the new lane
+
+    # Calculate accelerations for rear vehicles in the original and target lanes
+    a_r_o = calculate_idm_acceleration(v, or_v, rr_x, idm_params)
+    a_r_n = calculate_idm_acceleration(v, tr_v, rtr_x, idm_params)
+
+    # Calculate the incentive criterion
+    delta_a = a_n - a_f + politeness * (a_r_n - a_r_o + tr_acc - or_acc)
+
+    # Safety criterion
+    safe = (a_r_n > b_safe) & (a_r_o > b_safe)
+
+    # Decision making
+    change_decision[(delta_a > acc_thres) & safe] = 1
+
+    return change_decision
+2024-09-19 23:47:34,317 - research_agent_logger - INFO - Model loss: 0.958
+2024-09-19 23:47:34,317 - research_agent_logger - INFO - Model evaluation results: [Precision: 0.765, Recall: 0.021, F1: 0.042, Specificity: 0.993], Model confusion matrix: [TP: 316, TN: 14703, FP: 97, FN: 14484]
+2024-09-19 23:47:34,317 - research_agent_logger - INFO - Baseline model loss: 0.706, improved model loss: 0.958, improved rate: -35.70%.
+2024-09-19 23:47:58,370 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the MOBIL model iterations, particularly the last trial, reveals significant challenges in meeting performance requirements, with a notable decrease in model loss and very low recall rates. Here are the reasons for the low performance and specific suggestions for further improvement:
+
+### Reasons for Low Performance:
+1. **Overly Conservative Safety Parameters**: The parameters `b_safe` and `acc_thres` are set conservatively, leading to very high specificity but extremely low recall. This indicates that the model is overly cautious, preventing beneficial lane changes.
+2. **Static and Rigid Parameters**: The static nature of parameters such as `politeness`, which do not adjust to dynamic driving environments, could be leading to suboptimal decision-making.
+3. **Limited Scope of Interaction**: The model's focus on immediate neighboring vehicles may not adequately capture broader traffic dynamics, potentially missing safer and more efficient lane change opportunities.
+
+### Suggestions for Further Improvement:
+1. **Reevaluation of Safety Thresholds**: Reassess `b_safe` and `acc_thres` to find a balance that allows more lane changes without compromising safety. This could involve recalibrating these thresholds based on empirical data that reflect typical and atypical driving conditions.
+2. **Expansion of Interaction Modeling**: Broaden the scope of vehicle interactions beyond immediate neighbors. Incorporating a larger interaction radius could provide a more comprehensive view of traffic dynamics, which might reveal additional opportunities for safe lane changes.
+3. **Incorporation of Non-linear Dynamics**: Introduce non-linear dynamics into the model to better capture the complex behaviors observed in dense traffic. This approach could provide a more accurate representation of traffic flow, improving the model��s predictive accuracy.
+4. **Empirical Adjustment of IDM Parameters**: Refine IDM parameters such as `desired_time_window` and `jam_space` based on a broader range of empirical traffic data. This could help the model better mimic real-world driving behaviors, potentially increasing the accuracy of vehicle acceleration and deceleration predictions.
+
+By implementing these suggestions, the MOBIL model could potentially achieve a more balanced performance, enhancing both safety and efficiency in lane change decisions across various traffic scenarios.
+2024-09-19 23:47:58,372 - research_agent_logger - INFO - New questions: 
+ 1. **Clarification of Mathematical Formulations**: Can we identify specific mathematical formulations within the model that are contributing to inaccuracies or inefficiencies in the results? Are there alternative mathematical approaches or theories that could be integrated to enhance the model's performance?
+
+2. **Comparison with Analogous Models**: How are similar challenges being addressed in other non-machine learning mathematical models in the industry or academic research? Are there successful strategies or formulations in those models that we have not yet considered?
+
+3. **Model Complexity and Simplification**: Is the current complexity of the mathematical model necessary for achieving our objectives, or could simplifying some of the model's components lead to more reliable performance without significant loss of detail?
+
+4. **Robustness of Mathematical Assumptions**: Are the foundational assumptions in our mathematical formulations robust across different scenarios and conditions under which the model operates? How might these assumptions be tested or revised based on recent theoretical advances?
+
+5. **Interdisciplinary Approaches**: Could incorporating insights or methods from other fields such as physics, economics, or statistics offer new perspectives or techniques that could improve the model's formulation and performance?
+2024-09-19 23:47:58,372 - research_agent_logger - INFO - best_algorithm: 
+ None
+2024-09-19 23:47:58,372 - research_agent_logger - INFO - improve rate list (%): [1.54, 0.25, -20.6, -24.97, -20.3, -11.21, -7.9, -9.76, 5.21, -35.7]

@@ -1,0 +1,230 @@
+2024-09-19 21:46:13,059 - research_agent_logger - INFO - Configurations: 
+ {'task_name': 'IDM', 'llm_model': 'gpt-4-turbo', 'llm_temperature': 0.5, 'max_iter': 10, 'improve_rate': 0.2, 'seed': 2024, 'dataset_path': 'D:\\Documents\\Projects\\Traffic_Agent\\datasets', 'offline_paper_path': 'D:\\Documents\\Projects\\Traffic_Agent\\papers', 'code_gen_try_times': 5, 'IDM': {'data_sample_len': 15, 'dataset_name': 'SH_Fol', 'calib_data_len': 256, 'time_interval': 0.1, 'eval_metric': 'spacing_with_state'}, 'MOBIL': {'dataset_name': 'ngsim_data.npy'}, 'LWR': {'dataset_name': 'PeMS'}}
+2024-09-19 21:46:13,062 - research_agent_logger - INFO - Baseline model defination: 
+     def baseline_model(self, params, spacing, svSpd, lvSpd):
+        '''Calculate acceleration of the following vehicle using IDM model
+            spacing: scaler, headway distance between the leading and following vehicle
+            svSpd: scaler, speed of the following vehicle
+            lvSpd: scaler, speed of the leading vehicle  
+            params: [desired_speed, desired_time_window, max_acc, comfort_acc, beta, jam_space]
+            
+            return acc: scaler, acceleration of the following vehicle
+        '''
+        desiredSpd, desiredTimeHdw, maxAcc, comfortAcc, beta, jamSpace = params
+        relSpd = lvSpd - svSpd
+        desiredSpacing = jamSpace + np.maximum(0, svSpd * desiredTimeHdw - (svSpd * relSpd) / (2 * np.sqrt(maxAcc * comfortAcc)))
+        acc = maxAcc * (1 - svSpd / (desiredSpd + 1e-6) ** beta - desiredSpacing / (spacing + 1e-6) ** 2)
+        # handle the negative spacing
+        if spacing < 0:
+            acc = -maxAcc
+        return acc
+
+2024-09-19 21:51:09,482 - research_agent_logger - INFO - Base model total loss: 4.385
+2024-09-19 21:51:09,482 - research_agent_logger - INFO - Base model loss for each driving scenarios: [free driving: 4.0021, following: 5.1611, closing in: 5.5264,  emergency braking: 2.8521].
+2024-09-19 21:51:09,484 - research_agent_logger - INFO - ============ Iteration 0 ============
+2024-09-19 21:52:19,961 - research_agent_logger - INFO - Idea: 
+ The proposed mathematical improvements to the IDM model are designed to address its key deficiencies. These include introducing constraints to prevent negative velocities, damping factors to reduce over-reactions, extensions to consider multiple leading vehicles, and adaptive parameters that respond to varying traffic conditions. These enhancements should make the IDM more realistic and adaptable to complex driving scenarios.
+2024-09-19 21:52:42,150 - research_agent_logger - INFO - Code: 
+ def Improved_IDM(params, spacing, svSpd, lvSpd):
+    """
+    Implement the improved IDM model.
+    
+    :param params: list of parameters [desired_speed, desired_time_window, max_acc, comfort_acc, beta, jam_space]
+        - desired_speed (float): Desired speed of the following vehicle [m/s]
+        - desired_time_window (float): Desired time headway [s]
+        - max_acc (float): Maximum acceleration [m/s^2]
+        - comfort_acc (float): Comfortable acceleration [m/s^2]
+        - beta (float): Exponent parameter for acceleration
+        - jam_space (float): Minimum gap between vehicles in traffic jam [m]
+
+    :param spacing: scaler, gap between two vehicles [m]
+    :param svSpd: scaler, speed of the following vehicle [m/s]
+    :param lvSpd: scaler, speed of the lead vehicle [m/s]
+    :return: scaler, acceleration of the following vehicle in the next step [m/s^2]
+    """
+
+    # Import necessary libraries here
+    import numpy as np
+
+    # Unpack parameters
+    desiredSpd, desiredTimeHdw, maxAcc, comfortAcc, beta, jamSpace = params
+
+    # Calculate the desired minimum spacing
+    s_star = jamSpace + max(svSpd * desiredTimeHdw, 0) + \
+             (svSpd * (svSpd - lvSpd)) / (2 * np.sqrt(maxAcc * comfortAcc))
+
+    # Calculate the acceleration using the improved IDM formula
+    delta_v = svSpd - lvSpd
+    free_road_term = (desiredSpd - svSpd) / desiredSpd
+    interaction_term = -(spacing - s_star) / s_star if spacing > s_star else -maxAcc
+
+    # Apply the damping factor to reduce oscillations and over-reactions
+    damping_factor = np.exp(-beta * np.abs(delta_v))
+
+    # Calculate the final acceleration ensuring it does not exceed maxAcc
+    acceleration = maxAcc * (free_road_term + damping_factor * interaction_term)
+
+    # Prevent negative velocities by ensuring acceleration does not decrease speed below zero
+    if svSpd + acceleration < 0:
+        acceleration = -svSpd
+
+    return acceleration
+2024-09-19 21:58:09,204 - research_agent_logger - INFO - Model total loss: 12.766
+2024-09-19 21:58:09,205 - research_agent_logger - INFO - Model Loss for each driving scenarios: [free driving: 13.2126,  following: 15.7925, closing in: 14.3416,  emergency braking: 7.7193].
+2024-09-19 21:58:09,205 - research_agent_logger - INFO - Baseline model loss: 4.385, improved model loss: 12.766, improved rate: -191.11%. Throughout the driving event, the model performs worst in the following phase.
+2024-09-19 21:58:35,552 - research_agent_logger - INFO - Improve advice: 
+ The analysis of the last trial indicates that the modifications to the IDM model resulted in a significant increase in total loss, suggesting that the changes adversely affected the model's performance across various driving scenarios. Here are some potential reasons and suggestions for further improvement:
+
+1. **Complexity of the Improved Model**: The improved IDM model introduces additional complexity such as damping factors and adaptive parameters. While these are intended to enhance realism, they may have inadvertently increased the sensitivity of the model to small variations in input parameters or conditions, leading to higher losses. 
+
+   **Suggestion**: Simplify the model by reducing the number of modifications introduced at one time. Focus on implementing one change, such as the damping factor or adaptive parameters, and evaluate its impact independently before combining multiple enhancements.
+
+2. **Damping Factor Application**: The damping factor, aimed at reducing oscillations and over-reactions, is dependent on the relative speed (`delta_v`) and might be overly restrictive or improperly calibrated, leading to unnatural vehicle behaviors.
+
+   **Suggestion**: Reassess the formulation of the damping factor. Consider adjusting its influence based on empirical observations of actual vehicle behavior or through a more detailed theoretical analysis to find a balance that prevents over-damping.
+
+3. **Handling of Negative Velocities**: The method to prevent negative velocities by setting acceleration such that `svSpd + acceleration �� 0` might be too simplistic and could be interfering with the natural dynamics modeled by the IDM.
+
+   **Suggestion**: Develop a more nuanced approach to handle scenarios leading to negative velocities. This might involve revising the conditions under which this rule is applied or modifying how acceleration adjustments are calculated in such situations.
+
+4. **Interaction Term Calculation**: The interaction term in the acceleration calculation might be overly sensitive to the spacing and desired minimum spacing (`s_star`), especially when the spacing is less than `s_star`.
+
+   **Suggestion**: Refine the interaction term to be less aggressive in scenarios where spacing is close to but not below `s_star`. This could involve smoothing the transition between free road and interacting behaviors, possibly through a logistic or other sigmoidal function that moderates the sharpness of the response as vehicles approach critical distances.
+
+By addressing these specific areas, the model can be refined to better handle the complexities of real-world driving scenarios while maintaining the theoretical strengths of the IDM framework.
+2024-09-19 21:58:35,563 - research_agent_logger - INFO - New questions: 
+ 1. How can we modify the existing mathematical formulations to enhance their predictive accuracy without increasing computational complexity significantly?
+  
+2. What are the theoretical limitations of our current mathematical model, and how might alternative formulations address these limitations?
+
+3. Are there recent advancements or alternative approaches in similar fields that utilize non-machine learning mathematical models which we could adapt to our framework?
+
+4. How do current mathematical models handle the type of variability and uncertainty present in our data, and can these methods be integrated into our model to improve robustness?
+
+5. Can we incorporate any simplifications or approximations in the mathematical formulation that maintain performance while reducing the model's sensitivity to small parameter changes?
+2024-09-19 21:58:35,563 - research_agent_logger - INFO - ============ Iteration 1 ============
+2024-09-19 22:00:22,625 - research_agent_logger - INFO - Idea: 
+ To further improve the IDM model's performance based on the Analyzer's questions, the following steps can be taken:
+
+1. **Simplify and Test Incrementally**: Implement one modification at a time, such as introducing the damping factor or adaptive parameters, and assess its impact independently before integrating multiple enhancements. This approach will help in identifying the specific contributions of each change to the overall model performance.
+
+2. **Reassess Damping Factors**: Adjust the formulation of the damping factor based on more detailed empirical observations or theoretical analysis to find a balance that prevents over-damping and maintains natural vehicle behavior.
+
+3. **Refine Interaction Term**: Modify the interaction term calculation to be less aggressive when spacing is close to but not below the desired minimum spacing (`s_star`). Using a logistic or other sigmoidal function could help in smoothing the transition between free road and interacting behaviors.
+
+4. **Incorporate Stochastic Elements**: Introduce probabilistic components to better handle variability and uncertainty in driver behavior and traffic conditions. This could improve the robustness of the model by accounting for the unpredictability inherent in real-world driving scenarios.
+
+5. **Leverage Enhanced IDM Features**: Utilize the improvements from the Enhanced IDM, specifically its mechanisms to prevent over-reactions in multi-lane scenarios, to enhance the realism and applicability of the IDM in diverse traffic conditions.
+
+By implementing these steps, the IDM can be refined to better simulate realistic driving behaviors and traffic dynamics, thereby enhancing its utility in traffic modeling and simulation applications.
+2024-09-19 22:00:45,509 - research_agent_logger - INFO - Code: 
+ def Improved_IDM(params, spacing, svSpd, lvSpd):
+    """
+    Implement the improved IDM model.
+    
+    :param params: list of parameters [desired_speed, desired_time_window, max_acc, comfort_acc, beta, jam_space]
+        - desired_speed (float): Desired speed of the following vehicle [m/s]
+        - desired_time_window (float): Desired time headway [s]
+        - max_acc (float): Maximum acceleration [m/s^2]
+        - comfort_acc (float): Comfortable acceleration [m/s^2]
+        - beta (float): Exponent parameter for acceleration
+        - jam_space (float): Minimum gap between vehicles in traffic jam [m]
+
+    :param spacing: scaler, gap between two vehicles [m]
+    :param svSpd: scaler, speed of the following vehicle [m/s]
+    :param lvSpd: scaler, speed of the lead vehicle [m/s]
+    :return: scaler, acceleration of the following vehicle in the next step [m/s^2]
+    """
+
+    # Import necessary libraries here
+    import numpy as np
+
+    # Unpack parameters
+    desiredSpd, desiredTimeHdw, maxAcc, comfortAcc, beta, jamSpace = params
+
+    # Calculate the desired minimum spacing (s_star)
+    delta_v = svSpd - lvSpd
+    s_star = jamSpace + svSpd * desiredTimeHdw + (svSpd * delta_v) / (2 * np.sqrt(maxAcc * comfortAcc))
+
+    # Ensure s_star is non-negative
+    s_star = max(s_star, 0)
+
+    # Calculate acceleration using IDM formula
+    if spacing > 0:
+        acc_free = maxAcc * (1 - (svSpd / desiredSpd)**beta)
+        acc_interaction = -maxAcc * ((s_star / max(spacing, jamSpace))**2)
+    else:
+        # Handling the case where spacing might be zero or negative
+        acc_free = 0
+        acc_interaction = -maxAcc
+
+    # Combine free road and interaction accelerations
+    acceleration = acc_free + acc_interaction
+
+    # Ensure acceleration does not result in negative velocities
+    min_acc = -svSpd / 0.1  # Assuming a time step of 0.1 seconds
+    acceleration = max(acceleration, min_acc)
+
+    return acceleration
+2024-09-19 22:04:52,333 - research_agent_logger - INFO - Model total loss: 3.337
+2024-09-19 22:04:52,333 - research_agent_logger - INFO - Model Loss for each driving scenarios: [free driving: 3.0244,  following: 3.8384, closing in: 3.8856,  emergency braking: 2.5994].
+2024-09-19 22:04:52,334 - research_agent_logger - INFO - Baseline model loss: 4.385, improved model loss: 3.337, improved rate: 23.91%. Throughout the driving event, the model performs worst in the closing in phase.
+2024-09-19 22:04:52,334 - research_agent_logger - INFO - Improved model found!
+2024-09-19 22:05:01,057 - research_agent_logger - INFO - Success factors: 
+ The observed improvement in the IDM model's performance can be attributed to several key enhancements made in the latest iteration. Firstly, the refined calculation of the desired minimum spacing (s_star) incorporates both the vehicle's speed and the relative speed difference (delta_v), which better accounts for dynamic traffic conditions. This modification allows for a more adaptive response to varying traffic densities, particularly in complex driving scenarios like 'closing in' and 'emergency braking'.
+
+Secondly, the introduction of separate components for free road and interaction accelerations in the model allows for a more nuanced balance between maintaining desired speeds and responding to traffic conditions. By calculating and combining these accelerations, the model can smoothly transition between different driving behaviors, which is crucial in mixed traffic environments.
+
+Furthermore, the implementation of a minimum acceleration constraint ensures that the vehicle's speed does not turn negative, enhancing the realism and safety of the simulation. This is particularly effective in preventing unrealistic vehicle behaviors in critical scenarios.
+
+Overall, these enhancements have contributed to a significant reduction in total model loss, from 4.385 to 3.337, demonstrating a marked improvement in the model's ability to simulate realistic driving behaviors across various scenarios.
+2024-09-19 22:05:01,059 - research_agent_logger - INFO - best_algorithm: 
+ def Improved_IDM(params, spacing, svSpd, lvSpd):
+    """
+    Implement the improved IDM model.
+    
+    :param params: list of parameters [desired_speed, desired_time_window, max_acc, comfort_acc, beta, jam_space]
+        - desired_speed (float): Desired speed of the following vehicle [m/s]
+        - desired_time_window (float): Desired time headway [s]
+        - max_acc (float): Maximum acceleration [m/s^2]
+        - comfort_acc (float): Comfortable acceleration [m/s^2]
+        - beta (float): Exponent parameter for acceleration
+        - jam_space (float): Minimum gap between vehicles in traffic jam [m]
+
+    :param spacing: scaler, gap between two vehicles [m]
+    :param svSpd: scaler, speed of the following vehicle [m/s]
+    :param lvSpd: scaler, speed of the lead vehicle [m/s]
+    :return: scaler, acceleration of the following vehicle in the next step [m/s^2]
+    """
+
+    # Import necessary libraries here
+    import numpy as np
+
+    # Unpack parameters
+    desiredSpd, desiredTimeHdw, maxAcc, comfortAcc, beta, jamSpace = params
+
+    # Calculate the desired minimum spacing (s_star)
+    delta_v = svSpd - lvSpd
+    s_star = jamSpace + svSpd * desiredTimeHdw + (svSpd * delta_v) / (2 * np.sqrt(maxAcc * comfortAcc))
+
+    # Ensure s_star is non-negative
+    s_star = max(s_star, 0)
+
+    # Calculate acceleration using IDM formula
+    if spacing > 0:
+        acc_free = maxAcc * (1 - (svSpd / desiredSpd)**beta)
+        acc_interaction = -maxAcc * ((s_star / max(spacing, jamSpace))**2)
+    else:
+        # Handling the case where spacing might be zero or negative
+        acc_free = 0
+        acc_interaction = -maxAcc
+
+    # Combine free road and interaction accelerations
+    acceleration = acc_free + acc_interaction
+
+    # Ensure acceleration does not result in negative velocities
+    min_acc = -svSpd / 0.1  # Assuming a time step of 0.1 seconds
+    acceleration = max(acceleration, min_acc)
+
+    return acceleration
+2024-09-19 22:05:01,063 - research_agent_logger - INFO - improve rate list (%): [-191.11, 23.91]

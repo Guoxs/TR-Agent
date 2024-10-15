@@ -1,0 +1,6 @@
+datasets/IDM/HighD_test_data_with_state_15s.pkl filter=lfs diff=lfs merge=lfs -text
+datasets/IDM/HighD_train_data_with_state_15s.pkl filter=lfs diff=lfs merge=lfs -text
+datasets/IDM/HighD_test_data_with_state_30s.pkl filter=lfs diff=lfs merge=lfs -text
+datasets/IDM/HighD_train_data_with_state_30s.pkl filter=lfs diff=lfs merge=lfs -text
+datasets/IDM/SH_Fol_with_state.pkl filter=lfs diff=lfs merge=lfs -text
+datasets/MOBIL/ngsim_data.npy filter=lfs diff=lfs merge=lfs -text
