@@ -26,10 +26,16 @@ class IdeaGenerator:
         self.llm_model = config['llm_model']
         self.tempoerature = config['llm_temperature']
         self.task_name = config['task_name']
+        self.use_rag = config['use_RAG']
         self.paper_path = os.path.join(config['offline_paper_path'], self.task_name)
 
         self.llm = get_llm(config)
-        self.tools = self.make_tools()
+        
+        if self.use_rag:
+            self.tools = self.make_tools()
+        else:
+            self.tools = []
+            
         self.prompt = hub.pull("hwchase17/react")
         agent = create_react_agent(llm=self.llm, tools=self.tools, prompt=self.prompt)
         self.agent_executor = AgentExecutor(agent=agent, tools=self.tools, verbose=False, handle_parsing_errors=True)
@@ -40,7 +46,7 @@ class IdeaGenerator:
 
     def make_tools(self):
         offline_papers = self.load_offline_document(paper_path=self.paper_path)
-        ## add online search tools
+        # add online search tools
         search = TavilySearchAPIWrapper()
         tavily_tool = TavilySearchResults(
             api_wrapper=search, 

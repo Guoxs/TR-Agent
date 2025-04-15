@@ -96,14 +96,31 @@ Important:
                     params = [17.386, 5.0, 0.742, 0.1, 1.082, 0.1]
                     acc = func_closure(params, spacing, svSpd, lvSpd)
                     print(f"IDM test acceleration: {acc}")
+                    
+                    # check if acc is valid
+                    if acc < -10 or acc > 10:
+                        message = f"Invalid acceleration value: {acc}. The accelerate should be with in [-10, 10]. Please check the function implementation."
+                    
                 elif self.task_name == 'MOBIL':
                     default_params = [30.78, 0.166, 0.143, 0.174, 0.924, 4.55, 0.055, 2.27, 0.108]
                     lane_change_decision = func_closure(self.test_data, default_params)
                     print(f"MOBIL test lane change decision: {lane_change_decision}")
+                    
+                    # check if lane_change_decision is valid
+                    if any(decision not in [0, 1] for decision in lane_change_decision):
+                        message = f"Invalid lane change decision: {lane_change_decision}. \
+                        The decision should be either 0 or 1. Please check the function implementation."
+                    
                 elif self.task_name == 'LWR':
                     density_val = self.test_data
                     simulated_speed = func_closure(density_val, Vf=60, rho_max=100)
                     print(f"LWR test speed: {simulated_speed[:5]}")
+                    
+                    # check if simulated_speed is valid, speed should be in range [0, 500]
+                    if any(speed < 0 or speed > 500 for speed in simulated_speed):
+                        message = f"Invalid speed values: {simulated_speed}. The speed should be in range [0, 500]. \
+                        Please check the function implementation."
+    
                 else:
                     raise ValueError(f"Invalid task name: {self.task_name}")
             except Exception as e:

@@ -14,6 +14,8 @@ configs = {
     'dataset_path': os.path.join(project_root, 'datasets'),
     'offline_paper_path': os.path.join(project_root, 'papers'),
     'code_gen_try_times': 5,
+    
+    'use_RAG': False,
 
     'IDM': {
         'data_sample_len': 15,

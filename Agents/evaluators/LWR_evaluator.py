@@ -39,8 +39,8 @@ class LWREvaluator:
 
     def compute_loss(self, model_func, dataset, params, if_calib=False):
         Vf, rho_max = params
-        Vf *= self.fixed_speed
-        rho_max *= dataset['input'].max()
+        # Vf *= self.fixed_speed
+        # rho_max *= dataset['input'].max()
         
         speed_pred = model_func(dataset['input'], Vf, rho_max)
         speed_gt = dataset['label']
@@ -50,10 +50,13 @@ class LWREvaluator:
         if if_calib:
             return total_loss
         else:
-            # 0-0.3 low density, 0.3-0.6 medium density, 0.6-1 high density
-            low_density_loss = np.mean(loss_list[dataset['input'] < 0.3])
-            medium_density_loss = np.mean(loss_list[(dataset['input'] >= 0.3) & (dataset['input'] < 0.6)])
-            high_density_loss = np.mean(loss_list[dataset['input'] >= 0.6])
+             # [0-30%] low density, [30%-60%] medium density, [60%-100%] high density
+            low_threshold = np.percentile(dataset['input'], 30)
+            medium_threshold = np.percentile(dataset['input'], 60)
+
+            low_density_loss = np.mean(loss_list[dataset['input'] < low_threshold])
+            medium_density_loss = np.mean(loss_list[(dataset['input'] >= low_threshold) & (dataset['input'] < medium_threshold)])
+            high_density_loss = np.mean(loss_list[dataset['input'] >= medium_threshold])
             
             return total_loss, [low_density_loss, medium_density_loss, high_density_loss]
 
